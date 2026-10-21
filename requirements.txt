@@ -1,0 +1,7 @@
+playwright
+pdfplumber
+requests
+openai
+python-dotenv
+streamlit>=1.40
+pandas

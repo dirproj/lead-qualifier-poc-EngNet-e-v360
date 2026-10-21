@@ -1,0 +1,8 @@
+.env
+.venv/
+__pycache__/
+data/brutos/*
+!data/brutos/.gitkeep
+data/leads_processados.json
+data/cache_classificacao.json
+data/crm_estado.json
