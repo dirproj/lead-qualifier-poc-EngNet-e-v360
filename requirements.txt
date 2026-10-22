@@ -5,3 +5,5 @@ openai
 python-dotenv
 streamlit>=1.40
 pandas
+beautifulsoup4
+ddgs

@@ -1,137 +1,108 @@
 """
-ETAPA 2: ENRIQUECIMENTO (BrasilAPI)
+CONSULTA DE CNPJ (camada de dados oficiais abertos)
 =====================================================================
-Entrada: lista de dicts da etapa 1.
-Saída:   mesma lista + razão social, CNAE, porte, situação cadastral
-         + `status_enriquecimento`.
+Dado um CNPJ, devolve o cadastro da Receita Federal já normalizado:
+razão social, CNAE, porte, situação, sócios (QSA), telefones e e-mail
+cadastrados. Tenta duas fontes gratuitas, nesta ordem:
+    1) minhareceita.org   (espelho open-source da base aberta da Receita)
+    2) BrasilAPI          (reserva)
 
-A lista oficial do edital não traz CNPJ, e a BrasilAPI só consulta POR
-CNPJ. Para o MVP, o CNPJ vem de data/cnpjs_manuais.csv, preenchido pela
-equipe para os leads que vão aparecer no pitch:
-
-    proponente,cnpj
-    Nome Completo Como Na Lista,12.345.678/0001-95
-
-Teste (a partir da RAIZ do projeto):
-    python -m enriquecimento.brasilapi
+Os sites cnpj.biz e Casa dos Dados mostram ESTES MESMOS dados da Receita,
+muitas vezes com telefone/e-mail parcialmente ocultos. Por isso o contato
+vem daqui (completo e sem raspar ninguém); os sites só são usados para
+DESCOBRIR o CNPJ (veja descoberta.py).
 =====================================================================
 """
 
 from __future__ import annotations
 
-import csv
 import logging
 import time
-import unicodedata
-from pathlib import Path
 
 import requests
 
-from extracao.validacao import cnpj_valido, limpar_cnpj
+from extracao.validacao import limpar_cnpj
 
 log = logging.getLogger("enriquecimento")
 
-RAIZ = Path(__file__).resolve().parent.parent
-CSV_PADRAO = RAIZ / "data" / "cnpjs_manuais.csv"
-URL_BRASILAPI = "https://brasilapi.com.br/api/cnpj/v1/{}"
-
-# Valores possíveis de `status_enriquecimento` (o painel usa para filtrar)
-OK = "ok"
-SEM_CNPJ = "sem_cnpj"
-CNPJ_INVALIDO = "cnpj_invalido"
-NAO_ENCONTRADO = "nao_encontrado_ou_api_fora"
+FONTES_CNPJ = (
+    ("minhareceita", "https://minhareceita.org/{}"),
+    ("brasilapi", "https://brasilapi.com.br/api/cnpj/v1/{}"),
+)
+USER_AGENT = "lead-qualifier-poc/1.0 (hackathon; consulta de CNPJ publico)"
 
 
-def _chave(nome: str) -> str:
-    """Normaliza nome (sem acento, minúsculo, espaços únicos) para casar."""
-    sem_acento = unicodedata.normalize("NFKD", nome or "").encode("ascii", "ignore").decode()
-    return " ".join(sem_acento.lower().split())
-
-
-def carregar_mapa_cnpj(caminho: Path | str = CSV_PADRAO) -> dict[str, str]:
-    mapa: dict[str, str] = {}
-    try:
-        with open(caminho, newline="", encoding="utf-8") as f:
-            for linha in csv.DictReader(f):
-                if linha.get("proponente") and linha.get("cnpj"):
-                    mapa[_chave(linha["proponente"])] = limpar_cnpj(linha["cnpj"])
-        log.info("%d CNPJs carregados de %s.", len(mapa), Path(caminho).name)
-    except FileNotFoundError:
-        log.warning("Arquivo %s não encontrado; leads ficarão sem CNPJ.", caminho)
-    except Exception as e:
-        log.error("Erro lendo %s: %s", caminho, e)
-    return mapa
-
-
-def consultar_brasilapi(cnpj: str, tentativas: int = 3, timeout: int = 10) -> dict | None:
-    """Consulta com retry para 429 e erros de rede. None se não achar."""
+def _get_json(url: str, tentativas: int = 3, timeout: int = 15) -> tuple[dict | None, str]:
+    """Devolve (json, status) com status em 'ok', 'nao_encontrado' ou 'erro'."""
     for i in range(tentativas):
         try:
-            resp = requests.get(URL_BRASILAPI.format(cnpj), timeout=timeout)
+            resp = requests.get(url, timeout=timeout, headers={"User-Agent": USER_AGENT})
             if resp.status_code == 200:
-                return resp.json()
-            if resp.status_code == 404:
-                log.warning("CNPJ %s não encontrado na BrasilAPI.", cnpj)
-                return None
+                return resp.json(), "ok"
+            if resp.status_code in (404, 400):
+                return None, "nao_encontrado"
             if resp.status_code == 429:  # limite de requisições: espera e tenta de novo
                 time.sleep(2 * (i + 1))
                 continue
-            log.warning("BrasilAPI respondeu HTTP %s para %s.", resp.status_code, cnpj)
-        except requests.RequestException as e:  # fora do ar, timeout, DNS
-            log.warning("Erro de rede (%s). Tentativa %d/%d.", e, i + 1, tentativas)
+            log.warning("HTTP %s em %s", resp.status_code, url)
+        except (requests.RequestException, ValueError) as e:  # rede, timeout, JSON inválido
+            log.warning("Erro (%s) em %s. Tentativa %d/%d.", e, url, i + 1, tentativas)
             time.sleep(1)
+    return None, "erro"
+
+
+def _primeiro(d: dict, *chaves):
+    for c in chaves:
+        v = d.get(c)
+        if v not in (None, "", []):
+            return v
     return None
 
 
-def normalizar_resposta(d: dict) -> dict:
-    """Só os campos úteis ao SDR. Usa .get porque o schema pode variar."""
+def normalizar_registro(d: dict, cnpj: str, fonte: str) -> dict:
+    """Unifica o formato das duas fontes. Usa .get porque o schema pode variar."""
+    natureza = _primeiro(d, "natureza_juridica", "descricao_natureza_juridica") or ""
+    if isinstance(natureza, dict):
+        natureza = natureza.get("descricao", "")
+    qsa = d.get("qsa") or d.get("quadro_societario") or []
+    socios = [
+        (q.get("nome_socio") or q.get("nome") or "").strip()
+        for q in qsa if isinstance(q, dict)
+    ]
+    telefones = [str(t) for t in (
+        _primeiro(d, "ddd_telefone_1", "telefone_1", "telefone"),
+        _primeiro(d, "ddd_telefone_2", "telefone_2"),
+    ) if t]
+    individual = bool(d.get("opcao_pelo_mei")) or "individual" in str(natureza).lower()
+
     return {
+        "cnpj": limpar_cnpj(cnpj),
         "razao_social": d.get("razao_social"),
         "nome_fantasia": d.get("nome_fantasia"),
         "cnae_codigo": d.get("cnae_fiscal"),
         "cnae_descricao": d.get("cnae_fiscal_descricao"),
-        "porte": d.get("descricao_porte") or d.get("porte"),
+        "porte": _primeiro(d, "descricao_porte", "porte"),
+        "natureza_juridica": natureza or None,
         "situacao_cadastral": d.get("descricao_situacao_cadastral"),
         "data_abertura": d.get("data_inicio_atividade"),
         "uf": d.get("uf"),
         "municipio_cnpj": d.get("municipio"),
+        "titular_unico": individual,   # MEI / empresário individual / EIRELI
+        "socios": [s for s in socios if s],
+        "telefones": telefones,
+        "email": _primeiro(d, "email", "correio_eletronico"),
+        "fonte_cadastro": fonte,
     }
 
 
-def enriquecer_leads(leads: list[dict], mapa_cnpj: dict[str, str] | None = None,
-                     pausa: float = 0.3) -> list[dict]:
-    mapa_cnpj = carregar_mapa_cnpj() if mapa_cnpj is None else mapa_cnpj
-    saida: list[dict] = []
-
-    for lead in leads:
-        lead = dict(lead)  # não altera a lista original
-        cnpj = lead.get("cnpj") or mapa_cnpj.get(_chave(lead.get("proponente", "")))
-
-        if not cnpj:
-            lead["status_enriquecimento"] = SEM_CNPJ
-        elif not cnpj_valido(cnpj):
-            log.warning("CNPJ com dígito verificador inválido: %s", cnpj)
-            lead["status_enriquecimento"] = CNPJ_INVALIDO
-        else:
-            lead["cnpj"] = limpar_cnpj(cnpj)
-            dados = consultar_brasilapi(lead["cnpj"])
-            if dados:
-                lead.update(normalizar_resposta(dados))
-                lead["status_enriquecimento"] = OK
-            else:
-                lead["status_enriquecimento"] = NAO_ENCONTRADO
-            time.sleep(pausa)  # respeita o rate limit
-
-        saida.append(lead)
-
-    ok = sum(1 for l in saida if l["status_enriquecimento"] == OK)
-    log.info("Enriquecidos: %d de %d leads.", ok, len(saida))
-    return saida
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
-    exemplo = [{"titulo_projeto": "Teste", "proponente": "Fulano de Tal Demo",
-                "tematica": "TI", "municipio": "Brasília", "cnpj": None}]
-    for l in enriquecer_leads(exemplo):
-        print(l["proponente"], "|", l["status_enriquecimento"])
+def consultar_cnpj(cnpj: str) -> tuple[dict | None, str]:
+    """Devolve (registro_normalizado, status). status: 'ok', 'nao_encontrado' ou 'erro'."""
+    cnpj = limpar_cnpj(cnpj)
+    pior = "nao_encontrado"
+    for nome, modelo in FONTES_CNPJ:
+        dados, status = _get_json(modelo.format(cnpj))
+        if dados:
+            return normalizar_registro(dados, cnpj, nome), "ok"
+        if status == "erro":
+            pior = "erro"
+    return None, pior

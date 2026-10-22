@@ -59,6 +59,64 @@ def _norm(texto: str) -> str:
     return " ".join(re.sub(r"[^a-z0-9]+", " ", sem_acento.lower()).split())
 
 
+ALIAS_CAMPOS = {
+    "nota": "nota_fit", "score": "nota_fit", "fit": "nota_fit",
+    "confiança": "confianca", "confidence": "confianca",
+    "evidências": "evidencias", "serviços_sugeridos": "servicos_sugeridos",
+    "servicos": "servicos_sugeridos", "justificação": "justificativa",
+}
+
+
+def normalizar_dados(dados):
+    """Deixa a resposta do modelo no formato esperado ANTES de validar.
+    Modelos abertos (Llama, GPT-OSS) em modo JSON costumam devolver a nota como
+    texto ("7"), a confiança com acento ("média") ou omitir listas vazias. Em vez
+    de reprovar (e gastar uma chamada), corrigimos o que é inequívoco."""
+    if not isinstance(dados, dict):
+        return dados
+    d = {ALIAS_CAMPOS.get(k, k): v for k, v in dados.items()}
+    d["_avisos_normalizacao"] = []
+
+    nota = d.get("nota_fit")
+    if isinstance(nota, str):
+        achado = re.search(r"\d+(?:[.,]\d+)?", nota)
+        nota = float(achado.group().replace(",", ".")) if achado else nota
+    if isinstance(nota, float) and not isinstance(nota, bool):
+        nota = int(round(nota))
+    if nota is not None:
+        d["nota_fit"] = nota
+
+    conf = d.get("confianca")
+    if isinstance(conf, str):
+        c = _norm(conf)
+        d["confianca"] = {"alta": "alta", "media": "media", "baixa": "baixa"}.get(c, conf)
+
+    ins = d.get("dados_insuficientes")
+    if isinstance(ins, str):
+        d["dados_insuficientes"] = _norm(ins) in ("true", "sim", "verdadeiro", "1")
+    elif ins is None:
+        d["dados_insuficientes"] = False
+
+    serv = d.get("servicos_sugeridos")
+    if serv is None:
+        serv = []
+    if isinstance(serv, str):
+        serv = [s.strip() for s in serv.split(",") if s.strip()]
+    if isinstance(serv, list):
+        validos = [s for s in serv if s in CATALOGO_SERVICOS]
+        invalidos = [str(s) for s in serv if s not in CATALOGO_SERVICOS]
+        if invalidos:
+            d["_avisos_normalizacao"].append(f"serviços fora do catálogo descartados: {invalidos}")
+        d["servicos_sugeridos"] = validos
+
+    evid = d.get("evidencias")
+    if evid is None:
+        d["evidencias"] = []
+    elif isinstance(evid, str):
+        d["evidencias"] = [evid]
+    return d
+
+
 def faixa_da_nota(nota: int) -> str:
     return "alto" if nota >= 7 else "medio" if nota >= 4 else "baixo"
 
@@ -78,6 +136,8 @@ def validar_resposta(dados, texto_entrada: str) -> tuple[dict | None, list[str]]
     resultado traz `status_ia` ('ok' ou 'revisar') e `avisos_ia`."""
     if not isinstance(dados, dict):
         return None, ["a resposta não é um objeto JSON"]
+    dados = normalizar_dados(dados)
+    avisos_norm = dados.pop("_avisos_normalizacao", [])
     faltando = [c for c in SCHEMA["required"] if c not in dados]
     if faltando:
         return None, [f"campos ausentes: {faltando}"]
@@ -109,7 +169,7 @@ def validar_resposta(dados, texto_entrada: str) -> tuple[dict | None, list[str]]
         return None, problemas
 
     # ---- A partir daqui a resposta é aceita; ajustes viram avisos ----
-    avisos: list[str] = []
+    avisos: list[str] = list(avisos_norm)
     confianca = dados["confianca"]
     insuficiente = dados["dados_insuficientes"]
 
@@ -149,5 +209,6 @@ def validar_resposta(dados, texto_entrada: str) -> tuple[dict | None, list[str]]
         "servicos_sugeridos": servicos,
         "evidencias": validas,
         "status_ia": "ok" if not avisos else "revisar",
+        "origem_nota": "ia",
         "avisos_ia": avisos,
     }, []

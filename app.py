@@ -38,15 +38,22 @@ ETAPAS_CRM = ["Novo", "Contatado", "Em conversa", "Reunião marcada", "Descartad
 FAIXAS = ["alto", "medio", "baixo", "sem nota"]
 ICONE_FAIXA = {"alto": "🟢", "medio": "🟡", "baixo": "🔴", "sem nota": "⚪"}
 ROTULO_STATUS_IA = {
-    "ok": "✅ ok", "revisar": "⚠️ revisar", "falha": "❌ falha",
-    "sem_chave": "🔑 sem chave", "nao_processado": "⏸ não processado",
+    "ok": " ok", "revisar": " revisar", "falha": " falha",
+    "sem_chave": " sem chave", "nao_processado": "⏸ não processado",
 }
 ROTULO_ENRIQ = {
-    "ok": "✅ enriquecido", "sem_cnpj": "— sem CNPJ", "cnpj_invalido": "❌ CNPJ inválido",
-    "nao_encontrado_ou_api_fora": "⚠️ não encontrado",
+    "ok": " CNPJ vinculado", "sem_cnpj": "— sem CNPJ", "cnpj_invalido": " CNPJ inválido",
+    "nao_encontrado_ou_api_fora": " cadastro indisponível", "ambiguo": " ambíguo",
+    "nao_verificado": " não verificado",
+}
+ROTULO_CONTATO = {
+    "confirmado": " confirmado", "nao_confirmado": " não confirmado",
+    "compartilhado": " compartilhado", "contabilidade": " contabilidade",
+    "coworking": " coworking/recepção", "mascarado": " dígitos ocultos",
+    "incompleto": " incompleto", "invalido": " inválido", "sem_dado": "— sem dado",
 }
 
-st.set_page_config(page_title="Pré-SDR | Mini-CRM", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="Pré-SDR | Mini-CRM", page_icon=" ", layout="wide")
 
 
 # ---------------------------------------------------------------
@@ -98,6 +105,11 @@ def faixa_de(lead: dict) -> str:
     return lead.get("faixa_fit") or "sem nota"
 
 
+def formatar_cnpj(cnpj: str | None) -> str:
+    c = cnpj or ""
+    return f"{c[:2]}.{c[2:5]}.{c[5:8]}/{c[8:12]}-{c[12:]}" if len(c) == 14 else (c or "—")
+
+
 def nomes_servicos(chaves: list | None) -> str:
     return ", ".join(CATALOGO_SERVICOS.get(c, c) for c in (chaves or []))
 
@@ -124,7 +136,8 @@ def barra_lateral(leads: list[dict]) -> dict:
         "tematicas": sb.multiselect(
             "Temática", sorted({l.get("tematica") for l in leads if l.get("tematica")}),
         ),
-        "so_cnpj": sb.checkbox("Só com CNPJ enriquecido"),
+        "so_cnpj": sb.checkbox("Só com CNPJ vinculado"),
+        "so_telefone": sb.checkbox("Só com telefone confirmado"),
         "busca": sb.text_input("Buscar no projeto", placeholder="ex.: saúde, IoT, agro"),
     }
 
@@ -133,7 +146,7 @@ def barra_lateral(leads: list[dict]) -> dict:
         "Mostrar nome do proponente", value=False,
         help="Pessoas físicas. Deixe desligado em apresentações.",
     )
-    if sb.button("🔄 Recarregar dados"):
+    if sb.button(" Recarregar dados"):
         st.cache_data.clear()
         st.rerun()
 
@@ -160,6 +173,8 @@ def aplicar_filtros(leads: list[dict], f: dict) -> list[dict]:
             continue
         if f["so_cnpj"] and l.get("status_enriquecimento") != "ok":
             continue
+        if f["so_telefone"] and not l.get("telefone"):
+            continue
         if busca:
             texto = " ".join(str(l.get(c, "")) for c in (
                 "titulo_projeto", "tematica", "municipio", "justificativa", "razao_social")).lower()
@@ -174,14 +189,16 @@ def aplicar_filtros(leads: list[dict], f: dict) -> list[dict]:
 # ---------------------------------------------------------------
 def mostrar_kpis(todos: list[dict], filtrados: list[dict]) -> None:
     notas = [l["nota_fit"] for l in todos if l.get("nota_fit") is not None]
-    c = st.columns(5)
+    c = st.columns(6)
     c[0].metric("Leads extraídos", len(todos))
     c[1].metric("Exibindo", len(filtrados))
     c[2].metric("Alto fit (7+)", sum(1 for l in todos if faixa_de(l) == "alto"))
     c[3].metric("Para revisar", sum(1 for l in todos if l.get("status_ia") == "revisar"),
                 help="Respostas da IA que um guardrail pediu para conferir.")
     c[4].metric("Com CNPJ", sum(1 for l in todos if l.get("status_enriquecimento") == "ok"),
-                help="Enriquecidos pela BrasilAPI (CNAE, porte, situação).")
+                help="CNPJ encontrado automaticamente (ou informado) e conferido no cadastro oficial.")
+    c[5].metric("Telefone confirmado", sum(1 for l in todos if l.get("telefone")),
+                help="Só conta número completo e claramente da pessoa/startup (não contador, coworking etc.).")
     if notas:
         st.caption(f"Nota média de fit: {sum(notas) / len(notas):.1f} · {len(notas)} leads classificados")
 
@@ -204,6 +221,10 @@ def montar_tabela(leads: list[dict], crm: dict, mostrar_proponente: bool) -> pd.
             "Serviços sugeridos": nomes_servicos(l.get("servicos_sugeridos")),
             "IA": ROTULO_STATUS_IA.get(l.get("status_ia"), "—"),
             "CNPJ": ROTULO_ENRIQ.get(l.get("status_enriquecimento"), "—"),
+            "CNPJ nº": formatar_cnpj(l.get("cnpj")) if l.get("cnpj") else "—",
+            "Telefone": l.get("telefone") or "—",
+            "E-mail": l.get("email") or "—",
+            "Contato": ROTULO_CONTATO.get(l.get("telefone_status"), "—"),
             "Etapa": crm.get(lead_id(l), {}).get("etapa", "Novo"),
         })
         linhas.append(linha)
@@ -224,7 +245,11 @@ def exportar_csv(leads: list[dict], crm: dict, mostrar_proponente: bool) -> byte
             "servicos_sugeridos": nomes_servicos(l.get("servicos_sugeridos")),
             "justificativa": l.get("justificativa"), "status_ia": l.get("status_ia"),
             "cnpj": l.get("cnpj"), "razao_social": l.get("razao_social"),
+            "cnpj_origem": l.get("cnpj_origem"), "cnpj_confianca": l.get("cnpj_confianca"),
             "cnae": l.get("cnae_descricao"), "porte": l.get("porte"),
+            "telefone": l.get("telefone"), "telefone_status": l.get("telefone_status"),
+            "telefone_obs": l.get("telefone_obs"),
+            "email": l.get("email"), "email_status": l.get("email_status"),
             "etapa": crm.get(lead_id(l), {}).get("etapa", "Novo"),
             "anotacoes": crm.get(lead_id(l), {}).get("notas", ""),
         })
@@ -271,18 +296,40 @@ def painel_detalhe(lead: dict, crm: dict, mostrar_proponente: bool) -> None:
                 st.warning(f"Guardrail: {aviso}")
 
     with dir_:
-        st.markdown("**Dados cadastrais (BrasilAPI)**")
+        st.markdown("**Empresa (cadastro da Receita)**")
         if lead.get("status_enriquecimento") == "ok":
             st.write(f"**Razão social:** {lead.get('razao_social') or '—'}")
-            st.write(f"**CNPJ:** {lead.get('cnpj')}")
+            st.write(f"**CNPJ:** {formatar_cnpj(lead.get('cnpj'))}")
             st.write(f"**CNAE:** {lead.get('cnae_descricao') or '—'}")
-            st.write(f"**Porte:** {lead.get('porte') or '—'}")
-            st.write(f"**Situação:** {lead.get('situacao_cadastral') or '—'}")
+            st.write(f"**Porte:** {lead.get('porte') or '—'} · **Abertura:** {lead.get('data_abertura') or '—'}")
+            origem = {"automatico": "busca automática", "manual": "informado pela equipe"}.get(lead.get("cnpj_origem"), "—")
+            st.caption(f"Como foi encontrado: {origem} · confiança {lead.get('cnpj_confianca') or '—'}. "
+                       f"{lead.get('cnpj_evidencia') or ''}")
         else:
-            st.info(
-                "CNPJ ainda não levantado. Adicione o proponente em "
-                "`data/cnpjs_manuais.csv` e rode o pipeline de novo."
-            )
+            st.info(f"CNPJ não vinculado ({ROTULO_ENRIQ.get(lead.get('status_enriquecimento'), '—')}). "
+                    f"{lead.get('cnpj_evidencia') or ''}")
+            for cand in lead.get("cnpj_candidatos") or []:
+                st.caption(f"Candidato (NÃO confirmado): {formatar_cnpj(cand.get('cnpj'))} · "
+                           f"{cand.get('razao_social')} · {cand.get('motivo')}")
+
+        st.markdown("**Contato**")
+        if lead.get("status_enriquecimento") == "ok":
+            if lead.get("telefone"):
+                st.success(f"📞 {lead['telefone']} ({lead.get('telefone_tipo')}) · confiança {lead.get('telefone_confianca')}")
+            else:
+                st.warning(f"Telefone não usado: {ROTULO_CONTATO.get(lead.get('telefone_status'), '—')}")
+            st.caption(lead.get("telefone_obs") or "")
+            if lead.get("telefone_candidato"):
+                st.caption(f"Número no cadastro, NÃO confirmado: {lead['telefone_candidato']}")
+            if lead.get("email"):
+                st.success(f"✉️ {lead['email']} · confiança {lead.get('email_confianca')}")
+            else:
+                st.warning(f"E-mail não usado: {ROTULO_CONTATO.get(lead.get('email_status'), '—')}")
+            st.caption(lead.get("email_obs") or "")
+            if lead.get("email_candidato"):
+                st.caption(f"E-mail no cadastro, NÃO confirmado: {lead['email_candidato']}")
+        else:
+            st.caption("Sem CNPJ vinculado, não há contato a confirmar.")
 
         st.markdown("**Funil comercial**")
         atual = crm.get(lid, {})
@@ -335,7 +382,7 @@ def main() -> None:
         },
     )
     st.download_button(
-        "⬇️ Baixar leads filtrados (CSV)",
+        "⬇ Baixar leads filtrados (CSV)",
         data=exportar_csv(filtrados, crm, filtros["mostrar_proponente"]),
         file_name="leads_filtrados.csv", mime="text/csv",
     )

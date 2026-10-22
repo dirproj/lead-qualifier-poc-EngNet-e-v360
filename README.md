@@ -1,60 +1,51 @@
-# Lead Qualifier: Pré-SDR com IA para prospecção outbound
+# 🎯 Lead Qualifier: Pré-SDR com IA para prospecção outbound
 
 Prova de conceito (PoC) para o hackathon **IA Operacional e Produtividade no Trabalho**, trilha **Tecnologia & TI**.
 
-O sistema encontra projetos aprovados em editais públicos de inovação (ex.: **Programa Centelha**), enriquece os dados, usa uma IA como **Pré-SDR** para dar uma **nota de fit** a cada projeto e entrega tudo num **mini-CRM em Streamlit**, para o SDR começar o dia pelos leads que mais importam.
+O sistema lê a lista real de projetos aprovados num edital de inovação (ex.: **Programa Centelha**), **descobre sozinho o CNPJ e o contato** do proponente ou da startup, usa uma IA gratuita (**Groq**) como **Pré-SDR** para dar uma **nota de fit** a cada projeto e entrega tudo num **mini-CRM em Streamlit**.
 
-> **Em uma frase:** em vez de o SDR pesquisar dezenas de projetos um a um, a IA lê, pontua e justifica cada um, citando trechos dos próprios dados, e o SDR só gasta tempo nos melhores.
+> **Custo: R$ 0.** Groq (camada gratuita), minhareceita.org e BrasilAPI (dados abertos), Streamlit e Playwright (open source).
 
 ---
 
 ## Sumário
 
-1. [O problema e a solução](#o-problema-e-a-solução)
-2. [Arquitetura](#arquitetura)
-3. [Estrutura do projeto](#estrutura-do-projeto)
-4. [Instalação](#instalação)
-5. [Configuração](#configuração)
-6. [Como rodar](#como-rodar)
-7. [Guardrails contra alucinação](#guardrails-contra-alucinação)
-8. [Tratamento de falhas](#tratamento-de-falhas)
-9. [Privacidade e LGPD](#privacidade-e-lgpd)
+1. [Como funciona](#como-funciona)
+2. [Estrutura do projeto](#estrutura-do-projeto)
+3. [Instalação](#instalação)
+4. [Configuração](#configuração)
+5. [Como rodar](#como-rodar)
+6. [Diagnóstico: quando algo falha](#diagnóstico-quando-algo-falha)
+7. [Regra de contato](#regra-de-contato)
+8. [Guardrails contra alucinação](#guardrails-contra-alucinação)
+9. [Privacidade, LGPD e termos de uso](#privacidade-lgpd-e-termos-de-uso)
 10. [Limitações conhecidas](#limitações-conhecidas)
 11. [Roteiro da demonstração](#roteiro-da-demonstração)
-12. [Stack](#stack)
 
 ---
 
-## O problema e a solução
-
-**Problema.** Listas de aprovados em editais são uma fonte excelente de leads: são empresas nascentes de base tecnológica, prestes a investir em produto. Mas elas chegam em PDF, sem CNPJ e sem resumo do projeto, e qualificar dezenas de linhas manualmente consome o tempo do SDR.
-
-**Solução.** Um pipeline em quatro etapas:
-
-| # | Etapa | O que faz |
-|---|-------|-----------|
-| 1 | **Extração** | Abre a página real do edital (Playwright), encontra o PDF de resultado, inclusive em links do Google Drive, e lê a tabela (pdfplumber). |
-| 2 | **Enriquecimento** | Valida o CNPJ (dígito verificador) e consulta a **BrasilAPI**: razão social, CNAE, porte, situação cadastral. |
-| 3 | **Pré-SDR (IA)** | A OpenAI devolve **JSON estruturado** com nota de fit (0 a 10), confiança, justificativa, serviços sugeridos e evidências, protegido por guardrails. |
-| 4 | **Painel** | Mini-CRM em **Streamlit**: tabela interativa, filtros, detalhe do lead e funil comercial. |
-
----
-
-## Arquitetura
+## Como funciona
 
 ```mermaid
 flowchart LR
-    A["Página do edital<br/>(Centelha DF)"] -->|"Playwright:<br/>descobre PDFs"| B["PDF de resultado"]
-    B -->|"pdfplumber:<br/>lê a tabela"| C["1. Extração"]
-    CSV[("data/cnpjs_manuais.csv")] --> D
-    C --> D["2. Enriquecimento<br/>BrasilAPI"]
-    D --> E["3. Pré-SDR<br/>OpenAI + guardrails"]
-    E --> F[("data/leads_processados.json")]
-    F --> G["4. Streamlit<br/>mini-CRM"]
-    G --> H[("data/crm_estado.json<br/>etapa + anotações")]
+    A["Página do edital<br/>(Centelha DF)"] -->|"Playwright:<br/>acha o PDF"| B["1. Extração<br/>nome, projeto, temática"]
+    B --> C["2. Busca automática<br/>do CNPJ"]
+    C -->|"nome do sócio,<br/>nome da startup"| D["Casa dos Dados<br/>cnpj.biz · buscador"]
+    D -->|"candidatos"| E["Conferência no cadastro<br/>oficial (QSA, UF, ativa)"]
+    E --> F["Regra de contato<br/>telefone / e-mail"]
+    F --> G["3. Pré-SDR<br/>Groq + guardrails"]
+    G --> H[("leads_processados.json")]
+    H --> I["4. Streamlit<br/>mini-CRM"]
 ```
 
-Cada etapa é um pacote independente com funções pequenas e testáveis. O `pipeline.py` orquestra as três primeiras, e o `app.py` apenas **lê** o resultado. Isso significa que, se a rede ou a API falharem durante uma apresentação, o painel continua abrindo com o último resultado bom.
+| # | Etapa | O que faz |
+|---|-------|-----------|
+| 1 | **Extração** | Abre a página real do edital, encontra o PDF de resultado (inclusive em links do Google Drive) e lê a tabela. |
+| 2 | **CNPJ + contato (automático)** | Procura o CNPJ pelo **nome do proponente** (como sócio ou MEI) e pelo **nome da startup** tirado do título do projeto. **Cada candidato é conferido no cadastro oficial**; só é atribuído se o proponente for sócio/titular (ou o nome da startup bater), a empresa estiver ativa e for da UF do edital. Com o CNPJ vinculado, aplica a [regra de contato](#regra-de-contato). |
+| 3 | **Pré-SDR (IA)** | O Groq devolve JSON estruturado com nota (0 a 10), confiança, justificativa, serviços sugeridos e evidências literais, protegido por guardrails. |
+| 4 | **Painel** | Tabela interativa, filtros, detalhe do lead (com a origem do CNPJ e o status de cada contato) e funil comercial. |
+
+**Por que conferir cada candidato?** A busca por nome pode devolver homônimos. Os sites só *geram candidatos*; quem decide é o cadastro oficial (quadro societário, razão social de MEI, UF e situação). Se houver dois candidatos igualmente prováveis, o lead fica **ambíguo** e nenhum CNPJ é atribuído.
 
 ---
 
@@ -62,208 +53,170 @@ Cada etapa é um pacote independente com funções pequenas e testáveis. O `pip
 
 ```
 lead-qualifier-poc/
-├── app.py                      # Etapa 4: painel Streamlit (streamlit run app.py)
-├── pipeline.py                 # Orquestra as etapas 1, 2 e 3 e salva o JSON
+├── app.py                       # Etapa 4: painel Streamlit
+├── pipeline.py                  # Orquestra as etapas 1, 2 e 3
 ├── requirements.txt
-├── .env.example                # Modelo das variáveis de ambiente (copie para .env)
-├── .gitignore
+├── .env.example                 # copie para .env e coloque a chave do Groq
 │
-├── extracao/                   # Etapa 1
-│   ├── scraper.py              # Playwright + pdfplumber, links do Google Drive, CLI
-│   └── validacao.py            # Validação de CNPJ (inclui o formato alfanumérico)
+├── extracao/                    # Etapa 1
+│   ├── scraper.py               # Playwright + pdfplumber, links do Google Drive
+│   └── validacao.py             # validação de CNPJ (inclui o formato alfanumérico)
 │
-├── enriquecimento/             # Etapa 2
-│   └── brasilapi.py            # Consulta à BrasilAPI com retry e tratamento de 404/429
+├── enriquecimento/              # Etapa 2
+│   ├── descoberta.py            # nome -> CNPJs candidatos (Casa dos Dados, cnpj.biz, web)
+│   ├── brasilapi.py             # CNPJ -> cadastro oficial (minhareceita.org + BrasilAPI)
+│   ├── identidade.py            # este CNPJ é mesmo da pessoa/startup?
+│   ├── contato.py               # regra de telefone e e-mail
+│   └── orquestrador.py          # junta tudo; gera data/cnpjs_encontrados.csv
 │
-├── classificacao/              # Etapa 3
-│   ├── perfil.py               # O que a SUA empresa vende (editar antes de rodar)
-│   ├── llm.py                  # Prompt, chamada à OpenAI, cache e lote
-│   └── guardrails.py           # Schema estrito + validações anti-alucinação
+├── classificacao/               # Etapa 3
+│   ├── perfil.py                # ✏️ o que a SUA empresa vende (editar)
+│   ├── llm.py                   # Groq (API compatível com OpenAI), cache, diagnóstico
+│   └── guardrails.py            # schema estrito + validações anti-alucinação
 │
 └── data/
-    ├── brutos/                 # PDFs baixados (ignorado pelo git)
-    ├── cnpjs_manuais.csv       # CNPJs levantados pela equipe (proponente,cnpj)
-    ├── leads_processados.json  # Saída do pipeline, lida pelo painel
-    ├── cache_classificacao.json# Cache das respostas da IA (ignorado pelo git)
-    └── crm_estado.json         # Etapas e anotações do SDR (ignorado pelo git)
+    ├── brutos/                  # PDFs baixados
+    ├── cnpjs_encontrados.csv    # AUTOMÁTICO: o que a busca achou, com evidência
+    ├── cnpjs_manuais.csv        # OPCIONAL: correções da equipe (proponente,cnpj)
+    ├── leads_processados.json   # saída lida pelo painel
+    └── cache_*.json, crm_estado.json   # caches e funil (ignorados pelo git)
 ```
+
+> `cnpjs_manuais.csv` pode ficar vazio: a busca é automática. Ele serve só para **corrigir** um lead que a busca errou ou não achou, e tem prioridade sobre a busca.
 
 ---
 
 ## Instalação
 
-**Requisitos:** Python **3.10 ou superior** e uma chave de API da OpenAI.
+**Requisitos:** Python **3.10+**.
 
 ```powershell
-# 1) Crie e ative um ambiente virtual
 python -m venv .venv
-.venv\Scripts\Activate.ps1          # Windows (PowerShell)
-# source .venv/bin/activate         # Linux / macOS
+.venv\Scripts\Activate.ps1              # Windows (PowerShell)
+# source .venv/bin/activate             # Linux / macOS
 
-# 2) Instale as dependências
 pip install -r requirements.txt
-
-# 3) Baixe o navegador usado pelo Playwright (uma vez só)
-python -m playwright install chromium
+python -m playwright install chromium   # uma vez só
 ```
 
 ---
 
 ## Configuração
 
-### 1. Variáveis de ambiente (`.env`)
+### Chave gratuita do Groq
 
-Copie `.env.example` para `.env` na raiz e preencha:
+1. Crie uma chave em <https://console.groq.com/keys> (não pede cartão).
+2. Copie `.env.example` para `.env` e preencha:
 
 ```env
-OPENAI_API_KEY=sk-...
-OPENAI_MODEL=nome-do-modelo
+GROQ_API_KEY=gsk_...
+GROQ_MODEL=            # opcional; padrão: openai/gpt-oss-20b
+GROQ_PAUSA=2           # segundos entre chamadas (a camada gratuita tem limite por minuto)
 ```
 
-`OPENAI_MODEL` deve ser um modelo disponível na sua conta e com suporte a **Structured Outputs**. O padrão do código é `gpt-4o-mini`. O `.env` está no `.gitignore`: **nunca** suba a sua chave para o repositório.
+O `.env` está no `.gitignore`. **Nunca** suba a chave para o repositório.
 
-### 2. Perfil da empresa (`classificacao/perfil.py`)
+### Perfil da empresa
 
-A nota de fit só faz sentido se a IA souber o que **vocês** vendem. Edite `EMPRESA_DESCRICAO` e `CATALOGO_SERVICOS`. As chaves do catálogo são as únicas aceitas na saída da IA.
-
-### 3. CNPJs conhecidos (`data/cnpjs_manuais.csv`)
-
-As listas oficiais de aprovados **não trazem CNPJ**, e a BrasilAPI consulta **apenas por CNPJ**. Para os leads que a equipe quiser enriquecer, preencha:
-
-```csv
-proponente,cnpj
-Nome Completo Como Na Lista,12.345.678/0001-95
-```
-
-O nome é comparado sem diferenciar acentos e maiúsculas. Leads sem CNPJ continuam no painel com o status `sem CNPJ`.
+Edite `classificacao/perfil.py` com o que **vocês** vendem. A nota de fit depende disso.
 
 ---
 
 ## Como rodar
 
-### Gerar os dados (terminal, a partir da raiz)
-
 ```powershell
-# Teste barato: só 3 chamadas à OpenAI
+# Teste barato: só 3 chamadas ao LLM
 python pipeline.py --pagina https://programacentelha.com.br/df/ --max-ia 3
 
-# Rodada completa
+# Rodada completa (extração + CNPJ + contatos + IA)
 python pipeline.py --pagina https://programacentelha.com.br/df/
 
-# Sem IA (só extração + BrasilAPI)
-python pipeline.py --pagina https://programacentelha.com.br/df/ --sem-ia
+# Painel
+streamlit run app.py        # ou: python -m streamlit run app.py   -> http://localhost:8501
 ```
 
-O pipeline grava `data/leads_processados.json`, ordenado pela nota de fit.
+Opções do pipeline: `--sem-ia`, `--sem-busca-cnpj` (usa só o CSV manual), `--sem-cache-cnpj`, `--uf DF`, `--max-ia N`.
 
-### Abrir o painel
+Depois de cada rodada, abra `data/cnpjs_encontrados.csv` para **auditar** o que foi achado e com que evidência.
 
-```powershell
-streamlit run app.py
-# se o comando não for encontrado (Windows):
-python -m streamlit run app.py
-```
+---
 
-O painel abre em **http://localhost:8501**. Para encerrar, use `Ctrl+C` no terminal. Depois de rodar o pipeline de novo, clique em **🔄 Recarregar dados** na barra lateral.
+## Diagnóstico: quando algo falha
 
-### Usar outro edital ou outro estado
+| Sintoma | Comando | O que mostra |
+|---------|---------|--------------|
+| Nota não aparece / IA falhando | `python -m classificacao.llm --testar` | Faz 1 chamada real e mostra o erro exato (chave, modelo, limite) |
+| Quais modelos minha chave enxerga? | `python -m classificacao.llm --modelos` | Lista os modelos disponíveis |
+| CNPJ não é encontrado | `python -m enriquecimento.orquestrador --diagnostico "Nome do Proponente" --titulo "Título do projeto"` | Resultado de cada fonte (HTTP, bloqueio, nº de candidatos) e o veredito da conferência de cada candidato |
+| Colunas do PDF erradas | `python -m extracao.scraper --pagina URL --inspecionar` | Linhas do PDF com índices, para ajustar `--colunas` |
 
-Cada estado publica a lista num formato diferente. Para inspecionar um PDF e ajustar as colunas:
+No painel, o campo **Status da IA** e os avisos do detalhe do lead dizem por que uma nota está ausente (`sem_chave`, `falha`, `nao_processado`).
 
-```powershell
-# Mostra as linhas como o parser as vê, com índices [0] [1] [2]...
-python -m extracao.scraper --pagina https://URL-DA-PAGINA --inspecionar
+---
 
-# Informa onde está cada campo: titulo,proponente,tematica,municipio ("-" = ausente)
-python -m extracao.scraper --pagina https://URL-DA-PAGINA --colunas "1,2,3,4"
+## Regra de contato
 
-# Ou aponte direto para um PDF (URL ou arquivo local em data/brutos/)
-python -m extracao.scraper --pdf data/brutos/lista.pdf
-```
+Um telefone ou e-mail **só entra na coluna principal** quando **todas** as condições valem:
 
-Outras opções úteis: `--palavras "contratad,final"` (prioridade dos links de resultado) e `--limite N` (quantos PDFs ler).
+1. está **completo** (sem dígitos ocultos; DDD válido; 8 ou 9 dígitos);
+2. **não** é de contabilidade, coworking, recepção ou condomínio;
+3. **não** se repete em CNPJs diferentes (sinal de contador/escritório);
+4. o CNPJ foi **vinculado** ao proponente/startup;
+5. há **corroboração**: e-mail no domínio ou com o nome da própria startup/pessoa, **ou** o CNPJ é de MEI/empresário individual no nome do proponente.
 
-### O que o painel oferece
+Em qualquer outro caso o número **não vai para a coluna principal**, e o motivo aparece de forma explícita: `dígitos ocultos`, `incompleto`, `contabilidade`, `coworking/recepção`, `compartilhado` ou `não confirmado`. O número do cadastro, quando existe, aparece só no detalhe do lead, rotulado como **não confirmado**.
 
-- Indicadores: leads extraídos, alto fit, leads para revisar e leads com CNPJ.
-- Tabela interativa com nota, faixa, confiança, serviços sugeridos, status da IA e do CNPJ.
-- Filtros por faixa, nota mínima, confiança, status, temática e busca por texto.
-- Detalhe do lead: justificativa, **trechos literais** que sustentam a nota, avisos dos guardrails e dados da BrasilAPI.
-- Funil comercial: etapa (Novo, Contatado, Em conversa, Reunião marcada, Descartado) e anotações do SDR.
-- Exportação dos leads filtrados em CSV (abre direto no Excel).
+Mesmo um contato "confirmado" vem do cadastro do CNPJ e pode ter sido preenchido pelo contador; por isso o painel mostra a **confiança** (alta/média) e a observação.
 
 ---
 
 ## Guardrails contra alucinação
 
-A IA só tem **título, temática e município** do projeto (mais CNAE e porte, quando existem). Por isso o sistema foi desenhado para **não deixar o modelo inventar**:
-
 | Camada | O que garante |
 |--------|---------------|
-| **Dados de entrada** | Só os campos necessários vão para a OpenAI. O prompt trata o texto do projeto como **dado**, nunca como instrução (defesa contra injeção de prompt vinda do PDF). |
-| **Schema JSON estrito** | A API só aceita os campos e valores definidos. Os serviços sugeridos vêm de uma lista fechada (`perfil.py`). |
-| **Validação em Python** | Nota inteira de 0 a 10, confiança válida, justificativa de até 500 caracteres. Resposta inválida é rejeitada e o modelo recebe o erro para corrigir (até 3 tentativas). |
-| **Ancoragem em evidências** | Cada evidência citada precisa ser um **trecho literal** dos dados. Evidência inventada é descartada, a confiança cai e o lead vai para `revisar`. |
-| **Regras determinísticas** | Dados insuficientes limitam a nota a 4. Nota alta sem evidência é rebaixada para no máximo 6. |
-| **Termos suspeitos** | Palavras como *faturamento*, *investidores* ou *rodada* na justificativa, quando não constam nos dados, geram aviso. |
-| **Faixa calculada em código** | A faixa (alto 7+, médio 4 a 6, baixo 0 a 3) vem da nota, não do modelo. |
-| **Validação de CNPJ** | Dígitos verificadores conferidos antes de qualquer consulta, com suporte ao CNPJ alfanumérico. |
+| **Dados enviados ao LLM** | Só título, temática e município (mais CNAE/porte). O prompt trata o texto do projeto como **dado**, nunca como instrução. |
+| **Schema JSON estrito** | No Groq, modelos com Structured Outputs estrito (ex.: `openai/gpt-oss-20b`) só devolvem campos e valores permitidos. Outros modelos usam JSON Object Mode, com o mesmo schema no prompt. |
+| **Validação em Python** | Nota inteira de 0 a 10, serviços do catálogo; resposta inválida é rejeitada e o modelo corrige (até 3 tentativas). |
+| **Ancoragem** | Cada evidência precisa ser trecho **literal** dos dados; senão é descartada e o lead vai para `revisar`. |
+| **Regras determinísticas** | Dados insuficientes limitam a nota a 4; nota alta sem evidência cai para 6; termos como *faturamento* ou *investidores* sem base geram aviso. |
+| **Conferência de CNPJ** | Dígito verificador validado e candidato conferido no cadastro (sócio/MEI, UF, situação ativa). Ambíguo ou fraco **não é atribuído**. |
 
-Estados possíveis de cada avaliação (`status_ia`): `ok`, `revisar` (um guardrail pede conferência humana), `falha`, `sem_chave` e `nao_processado`.
+Falhas de rede, bloqueios e limites nunca derrubam o pipeline: viram status por lead. Respostas do LLM, buscas e cadastros ficam em **cache**, o que poupa a cota gratuita e deixa a demo estável.
 
 ---
 
-## Tratamento de falhas
+## Privacidade, LGPD e termos de uso
 
-Todo acesso externo usa `try/except` e **nunca derruba o pipeline**:
-
-- **Site do edital bloqueando ou lento:** timeout tratado e log claro.
-- **Google Drive devolvendo uma página em vez do PDF:** a extração detecta que não é PDF e orienta o plano B (baixar manualmente e usar `--pdf`).
-- **Sem rede, mas com PDF já baixado:** usa a cópia local em `data/brutos/`.
-- **BrasilAPI fora do ar, 404 ou 429:** retry com espera crescente, e o lead segue sem enriquecimento.
-- **OpenAI com limite de requisições, rede ou recusa:** retry e depois `status_ia = falha` apenas naquele lead.
-- **Chave inválida ou modelo inexistente:** as chamadas param com mensagem clara.
-- **Cache de respostas da IA:** leads já classificados não geram nova chamada, o que poupa custo e mantém a demo estável.
-
----
-
-## Privacidade e LGPD
-
-- O **nome do proponente** (pessoa física) **não é enviado** à OpenAI: o fit depende do projeto, não da pessoa.
-- No painel, o nome do proponente fica **oculto por padrão**.
-- Os dados de entrada vêm de listas públicas de resultado de editais.
-- A chave de API fica só no `.env`, fora do controle de versão.
+- O **nome do proponente não é enviado** ao LLM. No painel, ele fica **oculto por padrão**.
+- Os dados usados (lista de aprovados e cadastro de CNPJ) são **públicos**, mas telefone e e-mail de MEI/sócio são dados pessoais ligados a uma pessoa física. Para contato comercial, trabalhe com **interesse legítimo**, identifique-se, ofereça opt-out e não use os dados para outra finalidade.
+- **Termos de uso dos sites.** A busca por nome usa o endpoint público de pesquisa da Casa dos Dados, páginas do cnpj.biz e um buscador web. **Esses sites podem restringir acesso automatizado.** O código reduz o risco: respeita o `robots.txt`, espera ~2,5 s entre requisições, usa cache, para no primeiro site que responde e, se houver bloqueio ou captcha, **registra e segue em frente, sem tentar contornar**. Confira os termos de cada site antes de uso além do PoC. A Casa dos Dados também oferece uma API oficial com chave (`https://docs.casadosdados.com.br`) e os dados-fonte são os arquivos abertos da Receita Federal.
+- Chaves ficam só no `.env`.
 
 ---
 
 ## Limitações conhecidas
 
-- **As listas oficiais não têm CNPJ nem resumo do projeto.** O CNPJ é levantado manualmente (`cnpjs_manuais.csv`) para os melhores leads. Automatizar isso em escala exigiria uma base de sócios, como os dados abertos do CNPJ da Receita Federal, o que ficou fora do MVP.
-- **A IA decide com pouco texto** (título e temática). Por isso há o campo de confiança e o status `revisar`. A nota é uma **priorização**, não um veredito.
-- **O layout do PDF varia por estado.** Pode ser preciso ajustar `--colunas`.
-- **Suporte da BrasilAPI a CNPJ alfanumérico** não foi verificado. A validação local suporta o formato.
-- **Não há suíte de testes automatizados no repositório.** As funções de validação, extração, guardrails e painel foram testadas manualmente, e a chamada real à OpenAI foi testada apenas com cliente simulado antes da integração.
-- O painel é local e de usuário único (sem autenticação).
-
-**Próximos passos:** resolver CNPJ por base de sócios, buscar mais contexto do projeto (site e redes da empresa) para melhorar a nota, integração com CRM de verdade e testes automatizados.
+- **A busca de CNPJ depende de sites externos.** O endpoint público da Casa dos Dados e as páginas do cnpj.biz **não têm contrato de estabilidade** e podem mudar ou bloquear. O código foi testado contra servidores simulados, **não contra os sites reais**. Use `--diagnostico` na primeira rodada. Se todas as fontes falharem, o lead fica `sem_cnpj` e o CSV manual cobre os casos importantes.
+- **Nem todo proponente tem CNPJ ainda.** Muitos projetos são de pessoa física que abre a empresa só após a contratação; nesses casos `sem_cnpj` é o resultado correto.
+- **Homônimos.** A conferência reduz o risco, mas não o elimina; revise os leads `confiança média` antes de abordar.
+- **Contato do cadastro é incerto por natureza** (pode ser do contador). A regra acima é conservadora de propósito: poucos números na planilha, mas com motivo claro.
+- **A IA decide com pouco texto** (título e temática): a nota é uma priorização, não um veredito.
+- **Camada gratuita do Groq** tem limite de requisições por minuto/dia; o código espera e usa cache, mas uma rodada de muitos leads pode precisar ser feita em partes.
+- Não há suíte de testes automatizados no repositório; as peças foram testadas manualmente com dados e servidores simulados.
 
 ---
 
 ## Roteiro da demonstração
 
-1. **Terminal:** rode o pipeline e mostre o log (PDF real lido, CNPJs validados, classificação).
-2. **Painel:** abra o mini-CRM e filtre por **alto fit**.
-3. **Detalhe:** clique em um lead e mostre a justificativa, os trechos literais e a faixa de confiança.
-4. **Guardrail em ação:** abra um lead em `revisar` e mostre o aviso que o sistema gerou.
-5. **Enriquecimento:** mostre um lead com CNPJ preenchido (razão social, CNAE, porte).
-6. **CRM:** mova um lead para *Contatado*, adicione uma anotação e exporte o CSV.
+1. **Terminal:** rode o pipeline (PDF real, busca de CNPJ, contatos, IA) e mostre `data/cnpjs_encontrados.csv`.
+2. **Painel:** filtre por **alto fit** e por **telefone confirmado**.
+3. **Detalhe:** mostre a justificativa com trechos literais e **como o CNPJ foi encontrado** (evidência e confiança).
+4. **Contato claro:** abra um lead com contato **bloqueado** (contabilidade, compartilhado ou dígitos ocultos) e mostre o motivo.
+5. **Guardrail:** abra um lead em `revisar` ou `ambíguo`.
+6. **CRM:** mova um lead para *Contatado*, anote e exporte o CSV.
 
 ---
 
-## Stack
+**Stack:** Python 3.10+ · Playwright · pdfplumber · requests · Groq (SDK `openai`) · minhareceita.org / BrasilAPI · Streamlit · pandas
 
-Python 3.10+ · Playwright · pdfplumber · requests · BrasilAPI · OpenAI (Structured Outputs) · Streamlit · pandas
-
----
-
-**Equipe:** 
+**Equipe:** _(preencha os nomes)_
