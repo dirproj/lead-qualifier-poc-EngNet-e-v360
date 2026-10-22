@@ -6,15 +6,19 @@ tabela interativa, com filtros, detalhe de cada lead e um funil
 comercial simples (etapa + anotações do SDR).
 
 COMO RODAR (a partir da RAIZ do projeto):
-    pip install -r requirements.txt
-    python pipeline.py --pagina "https://programacentelha.com.br/df/"   # gera os dados
+    pip install -r requirements.txt     # precisa de streamlit >= 1.37
     streamlit run app.py             # no Windows, se não achar o comando:
     python -m streamlit run app.py
     # abre em http://localhost:8501 (Ctrl+C no terminal encerra o servidor)
 
-O painel só LÊ data/leads_processados.json. Para atualizar os dados, rode
-o pipeline de novo no terminal e clique em "Recarregar dados" na barra lateral.
-O estado comercial (etapa e anotações) fica em data/crm_estado.json.
+A busca de leads é feita pelo botão "Buscar leads" no topo da página: ele
+roda o mesmo `pipeline.py` que antes era chamado no terminal (teste rápido
+com --max-ia, ou rodada completa) e mostra o andamento ao vivo. A tabela
+atualiza sozinha quando a coleta termina.
+
+O painel LÊ data/leads_processados.json (gerado pelo pipeline). O estado
+comercial (etapa e anotações) fica em data/crm_estado.json e NÃO é apagado
+por novas coletas.
 =====================================================================
 """
 
@@ -22,6 +26,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import subprocess
+import sys
+import threading
+import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 
@@ -33,6 +43,22 @@ from classificacao.perfil import CATALOGO_SERVICOS
 RAIZ = Path(__file__).resolve().parent
 ARQ_LEADS = RAIZ / "data" / "leads_processados.json"
 ARQ_CRM = RAIZ / "data" / "crm_estado.json"
+ARQ_PIPELINE = RAIZ / "pipeline.py"
+
+# A página de cada estado segue o padrão https://programacentelha.com.br/<uf>/
+URL_CENTELHA = "https://programacentelha.com.br/{uf}/"
+ESTADOS = {
+    "AC": "Acre", "AL": "Alagoas", "AP": "Amapá", "AM": "Amazonas", "BA": "Bahia",
+    "CE": "Ceará", "DF": "Distrito Federal", "ES": "Espírito Santo", "GO": "Goiás",
+    "MA": "Maranhão", "MT": "Mato Grosso", "MS": "Mato Grosso do Sul",
+    "MG": "Minas Gerais", "PA": "Pará", "PB": "Paraíba", "PR": "Paraná",
+    "PE": "Pernambuco", "PI": "Piauí", "RJ": "Rio de Janeiro",
+    "RN": "Rio Grande do Norte", "RS": "Rio Grande do Sul", "RO": "Rondônia",
+    "RR": "Roraima", "SC": "Santa Catarina", "SP": "São Paulo", "SE": "Sergipe",
+    "TO": "Tocantins",
+}
+MODO_TESTE = "Teste rápido"
+MODO_COMPLETO = "Rodada completa"
 
 ETAPAS_CRM = ["Novo", "Contatado", "Em conversa", "Reunião marcada", "Descartado"]
 FAIXAS = ["alto", "medio", "baixo", "sem nota"]
@@ -70,18 +96,20 @@ def _ler_leads(caminho: str, mtime: float) -> list[dict]:
     return json.loads(Path(caminho).read_text(encoding="utf-8"))
 
 
-def carregar_leads() -> list[dict]:
+def carregar_leads() -> list[dict] | None:
+    """Devolve os leads, ou None se ainda não há dados legíveis (a página segue
+    sendo exibida, para o botão de busca continuar disponível)."""
     if not ARQ_LEADS.exists():
-        st.error(
-            "Ainda não há dados. Rode no terminal:\n\n"
-            '`python pipeline.py --pagina "https://programacentelha.com.br/df/"`'
-        )
-        st.stop()
+        return None
     try:
         return _ler_leads(str(ARQ_LEADS), ARQ_LEADS.stat().st_mtime)
     except (json.JSONDecodeError, OSError) as e:
-        st.error(f"Não consegui ler {ARQ_LEADS.name}: {e}. Rode o pipeline novamente.")
-        st.stop()
+        st.error(
+            f"Não consegui ler {ARQ_LEADS.name}: {e}. Se uma busca estiver em andamento, "
+            "o arquivo pode estar sendo gravado agora; aguarde e recarregue. "
+            "Caso contrário, rode a busca novamente."
+        )
+        return None
 
 
 def carregar_crm() -> dict:
@@ -112,6 +140,193 @@ def formatar_cnpj(cnpj: str | None) -> str:
 
 def nomes_servicos(chaves: list | None) -> str:
     return ", ".join(CATALOGO_SERVICOS.get(c, c) for c in (chaves or []))
+
+
+# ---------------------------------------------------------------
+# Busca de leads (roda o pipeline.py sem precisar do terminal)
+# ---------------------------------------------------------------
+class ExecucaoPipeline:
+    """Roda `pipeline.py` em um subprocesso e guarda o log.
+
+    Existe UMA instância por servidor (ver `execucao_pipeline`), então:
+    - recarregar a página não perde o andamento;
+    - dois cliques (ou duas abas) nunca disparam duas coletas ao mesmo tempo,
+      o que evitaria gasto duplicado de créditos da OpenAI.
+    """
+
+    MAX_LINHAS = 500
+
+    def __init__(self) -> None:
+        self._trava = threading.Lock()
+        self.proc: subprocess.Popen | None = None
+        self.linhas: deque[str] = deque(maxlen=self.MAX_LINHAS)
+        self.inicio: float | None = None
+        self.fim: float | None = None
+        self.cancelado = False
+        self.descricao = ""
+
+    @property
+    def rodando(self) -> bool:
+        # `fim` só é preenchido DEPOIS de o log inteiro ter sido lido.
+        return self.proc is not None and self.fim is None
+
+    @property
+    def codigo(self) -> int | None:
+        return self.proc.returncode if self.proc is not None and self.fim is not None else None
+
+    @property
+    def duracao(self) -> float:
+        if self.inicio is None:
+            return 0.0
+        return (self.fim or time.time()) - self.inicio
+
+    def iniciar(self, url: str, max_ia: int | None) -> str | None:
+        """Dispara a coleta. Devolve uma mensagem de erro, ou None se deu certo."""
+        with self._trava:
+            if self.rodando:
+                return "Já existe uma busca em andamento."
+            # Lista de argumentos (sem shell): a URL nunca é interpretada como comando.
+            cmd = [sys.executable, "-u", str(ARQ_PIPELINE), "--pagina", url]
+            if max_ia:
+                cmd += ["--max-ia", str(max_ia)]
+            env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
+            self.linhas.clear()
+            self.cancelado = False
+            self.descricao = f"{url}" + (f" · teste com até {max_ia} chamadas à IA" if max_ia else " · rodada completa")
+            try:
+                self.proc = subprocess.Popen(
+                    cmd, cwd=RAIZ, env=env, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, encoding="utf-8", errors="replace", bufsize=1,
+                )
+            except OSError as e:
+                self.proc = None
+                return f"Não consegui iniciar o pipeline: {e}"
+            self.inicio, self.fim = time.time(), None
+            threading.Thread(target=self._ler_saida, args=(self.proc,), daemon=True).start()
+            return None
+
+    def _ler_saida(self, proc: subprocess.Popen) -> None:
+        try:
+            for linha in proc.stdout:  # type: ignore[union-attr]
+                self.linhas.append(linha.rstrip())
+        finally:
+            proc.wait()
+            self.fim = time.time()
+
+    def cancelar(self) -> None:
+        if self.rodando and self.proc is not None:
+            self.cancelado = True
+            self.proc.terminate()
+
+
+@st.cache_resource
+def execucao_pipeline() -> ExecucaoPipeline:
+    return ExecucaoPipeline()
+
+
+def chave_openai_configurada() -> bool:
+    """True se OPENAI_API_KEY existe no ambiente ou no .env (nunca exibe o valor)."""
+    if os.environ.get("OPENAI_API_KEY"):
+        return True
+    try:
+        for linha in (RAIZ / ".env").read_text(encoding="utf-8").splitlines():
+            nome, _, valor = linha.partition("=")
+            if nome.strip().removeprefix("export ").strip() == "OPENAI_API_KEY" and valor.strip().strip("'\""):
+                return True
+    except OSError:
+        pass
+    return False
+
+
+def _fmt_duracao(segundos: float) -> str:
+    m, s = divmod(int(segundos), 60)
+    return f"{m}min {s:02d}s" if m else f"{s}s"
+
+
+def _acompanhar() -> None:
+    """Mostra o log ao vivo. Roda como fragmento: atualiza sozinho a cada 1,5 s
+    sem recarregar a página inteira (precisa de streamlit >= 1.37)."""
+    exe = execucao_pipeline()
+    if not exe.rodando:  # terminou entre dois ciclos: redesenha a página inteira
+        st.rerun()
+        return
+    st.info(f"⏳ Buscando leads… {_fmt_duracao(exe.duracao)} · {exe.descricao}\n\n"
+            "Pode continuar usando o painel; a tabela atualiza quando terminar.")
+    st.code("\n".join(list(exe.linhas)[-25:]) or "Iniciando…", language=None)
+    if not hasattr(st, "fragment"):  # Streamlit antigo: sem atualização automática
+        st.button("Atualizar andamento", key="btn_atualizar_andamento")
+    if st.button("⏹ Cancelar busca", key="btn_cancelar_busca"):
+        exe.cancelar()
+
+
+# Com st.fragment(run_every=...) o log se atualiza sozinho; em versões antigas
+# do Streamlit a função roda normalmente, com um botão manual de atualização.
+acompanhar_execucao = st.fragment(run_every=1.5)(_acompanhar) if hasattr(st, "fragment") else _acompanhar
+
+
+def _resumo_ultima_execucao(exe: ExecucaoPipeline) -> None:
+    if exe.inicio is None or exe.rodando:
+        return
+    if exe.cancelado:
+        st.warning(f"Busca cancelada após {_fmt_duracao(exe.duracao)}. Os dados anteriores foram mantidos "
+                   "(ou parciais, se o pipeline já tinha gravado algo).")
+    elif exe.codigo == 0:
+        st.success(f"✅ Busca concluída em {_fmt_duracao(exe.duracao)} · {exe.descricao}")
+    else:
+        st.error(f"❌ A busca terminou com erro (código {exe.codigo}). Veja o log abaixo.")
+    with st.expander("Ver log da última busca", expanded=exe.codigo not in (0, None) and not exe.cancelado):
+        st.code("\n".join(exe.linhas) or "(sem saída)", language=None)
+
+
+def painel_coleta() -> None:
+    exe = execucao_pipeline()
+    with st.container(border=True):
+        st.markdown("#### 🔎 Buscar leads")
+
+        if not ARQ_PIPELINE.exists():
+            st.error(f"Não encontrei `{ARQ_PIPELINE.name}` na pasta do projeto ({RAIZ}).")
+            return
+
+        if exe.rodando:
+            acompanhar_execucao()
+            return
+
+        c1, c2 = st.columns([2, 3])
+        uf = c1.selectbox(
+            "Estado", list(ESTADOS), index=list(ESTADOS).index("DF"),
+            format_func=lambda s: f"{s} · {ESTADOS[s]}", key="coleta_uf",
+        )
+        modo = c2.radio(
+            "Tipo de busca", [MODO_TESTE, MODO_COMPLETO], horizontal=True, key="coleta_modo",
+            help="Teste rápido: faz tudo, mas só chama a IA para poucos leads (barato). "
+                 "Rodada completa: classifica todos os leads com a IA.",
+        )
+
+        max_ia: int | None = None
+        liberado = True
+        if modo == MODO_TESTE:
+            max_ia = int(st.number_input(
+                "Máximo de chamadas à IA", min_value=1, max_value=50, value=3, step=1, key="coleta_max_ia",
+                help="Os demais leads aparecem como 'não processado', sem nota de fit.",
+            ))
+        else:
+            liberado = st.checkbox(
+                "Entendo que a rodada completa usa créditos da API da OpenAI", key="coleta_confirma",
+            )
+
+        if not chave_openai_configurada():
+            st.warning("Não encontrei OPENAI_API_KEY no `.env`: a busca roda, mas os leads ficam "
+                       "sem classificação da IA (status “sem chave”).")
+
+        if st.button("▶ Buscar leads", type="primary", disabled=not liberado, key="btn_buscar_leads"):
+            erro = exe.iniciar(URL_CENTELHA.format(uf=uf.lower()), max_ia)
+            if erro:
+                st.error(erro)
+            else:
+                st.rerun()
+
+        _resumo_ultima_execucao(exe)
 
 
 # ---------------------------------------------------------------
@@ -355,7 +570,13 @@ def main() -> None:
     if st.session_state.pop("_salvo", False):
         st.toast("Estado comercial salvo")
 
+    painel_coleta()
+
     todos = carregar_leads()
+    if todos is None:
+        if not execucao_pipeline().rodando:
+            st.info("Ainda não há dados. Escolha o estado e clique em **Buscar leads** acima.")
+        return
     filtros = barra_lateral(todos)
     filtrados = aplicar_filtros(todos, filtros)
     crm = carregar_crm()
