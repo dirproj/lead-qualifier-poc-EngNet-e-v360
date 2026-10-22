@@ -371,6 +371,34 @@ def barra_lateral(leads: list[dict]) -> dict:
     return filtros
 
 
+def estado_da_lead(lead: dict) -> str:
+    """Identifica a UF da lead a partir dos campos disponíveis no JSON."""
+    chaves_estado = ("uf", "estado_uf", "sigla_uf", "estado", "unidade_federativa")
+    for chave in chaves_estado:
+        valor = lead.get(chave)
+        if not valor:
+            continue
+        texto = str(valor).strip()
+        sigla = texto.upper()
+        if sigla in ESTADOS:
+            return sigla
+        for uf, nome in ESTADOS.items():
+            if texto.casefold() == nome.casefold():
+                return uf
+
+    # Algumas fontes guardam apenas a URL da página de origem.
+    chaves_url = ("url_origem", "pagina_origem", "url_fonte", "url", "fonte", "link")
+    for chave in chaves_url:
+        valor = lead.get(chave)
+        if not valor:
+            continue
+        url = str(valor).lower().replace("https://", "http://")
+        for uf in ESTADOS:
+            if f"programacentelha.com.br/{uf.lower()}/" in url:
+                return uf
+    return "Não identificado"
+
+
 def aplicar_filtros(leads: list[dict], f: dict) -> list[dict]:
     busca = f["busca"].strip().lower()
     saida = []
@@ -578,10 +606,26 @@ def main() -> None:
             st.info("Ainda não há dados. Escolha o estado e clique em **Buscar leads** acima.")
         return
     filtros = barra_lateral(todos)
-    filtrados = aplicar_filtros(todos, filtros)
+
+    # Filtro adicional para navegar pelas leads mapeadas em cada estado.
+    estados_disponiveis = sorted({estado_da_lead(l) for l in todos}, key=lambda uf: (uf == "Não identificado", uf))
+    opcoes_estado = ["Todos os estados", *estados_disponiveis]
+    estado_selecionado = st.selectbox(
+        "Estado das leads",
+        opcoes_estado,
+        key="filtro_estado_leads",
+        help="Filtra a tabela para mostrar apenas leads associadas ao estado selecionado.",
+    )
+
+    leads_por_estado = todos if estado_selecionado == "Todos os estados" else [
+        l for l in todos if estado_da_lead(l) == estado_selecionado
+    ]
+    filtrados = aplicar_filtros(leads_por_estado, filtros)
     crm = carregar_crm()
 
     mostrar_kpis(todos, filtrados)
+    if estados_disponiveis == ["Não identificado"]:
+        st.caption("Não encontrei a UF nos campos das leads. Para filtrar por estado, o JSON precisa registrar a UF ou a URL de origem de cada lead.")
 
     contagem = pd.Series([faixa_de(l) for l in filtrados]).value_counts().reindex(FAIXAS, fill_value=0)
     with st.expander("Distribuição por faixa de fit", expanded=False):
