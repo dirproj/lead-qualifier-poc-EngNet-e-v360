@@ -199,7 +199,7 @@ def enriquecer_leads(leads: list[dict], mapa_cnpj: dict[str, str] | None = None,
 
     proprio = None
     if automatico and buscador is None:
-        proprio = buscador = Buscador(uf=uf_alvo)
+        proprio = buscador = Buscador()
     if not automatico:
         buscador = None
 

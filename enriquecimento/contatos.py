@@ -282,3 +282,97 @@ def coletar_contatos_leads(leads: list[dict], usar_web: bool = True, max_leads: 
             feitos += 1
         saida.append(lead)
     return saida
+
+
+# ---------------------------------------------------------------
+# Compatibilidade com o orquestrador de enriquecimento de CNPJ
+# ---------------------------------------------------------------
+def _chave_contato_compartilhado(tipo: str, valor: str) -> str | None:
+    if tipo == "telefone":
+        info = analisar_telefone(str(valor or ""))
+        return info["normalizado"] if info["estado"] == "completo" else None
+    valor = str(valor or "").strip().lower()
+    return valor if "@" in valor else None
+
+
+def contatos_compartilhados(registros: list[dict]) -> tuple[set[str], set[str]]:
+    """Identifica telefones/e-mails repetidos em CNPJs distintos.
+
+    Retorna (telefones_compartilhados, emails_compartilhados). A comparação
+    é feita por valor normalizado e conta cada CNPJ apenas uma vez.
+    """
+    donos_tel: dict[str, set[str]] = {}
+    donos_mail: dict[str, set[str]] = {}
+    for registro in registros:
+        cnpj = re.sub(r"\D", "", str(registro.get("cnpj") or ""))
+        if not cnpj:
+            continue
+        for campo in ("ddd_telefone_1", "ddd_telefone_2"):
+            chave = _chave_contato_compartilhado("telefone", registro.get(campo, ""))
+            if chave:
+                donos_tel.setdefault(chave, set()).add(cnpj)
+        chave_mail = _chave_contato_compartilhado("email", registro.get("email") or registro.get("email_receita") or "")
+        if chave_mail:
+            donos_mail.setdefault(chave_mail, set()).add(cnpj)
+    return (
+        {valor for valor, cnpjs in donos_tel.items() if len(cnpjs) > 1},
+        {valor for valor, cnpjs in donos_mail.items() if len(cnpjs) > 1},
+    )
+
+
+def avaliar_contato(registro: dict, ident: dict, lead: dict,
+                    tel_comp: set[str], mail_comp: set[str],
+                    vinculo_ok: bool) -> dict:
+    """Adapta os contatos do cadastro aos campos esperados pelo orquestrador.
+
+    Contatos repetidos em CNPJs diferentes são descartados como possivelmente
+    compartilhados. Dados da Receita sem prova independente de titularidade
+    permanecem duvidosos, nunca são promovidos automaticamente a confirmados.
+    """
+    contatos_avaliados = []
+    for item in _contatos_da_receita(registro):
+        tipo, valor = item["tipo"], item["valor"]
+        chave = _chave_contato_compartilhado(tipo, valor)
+        compartilhado = chave is not None and (
+            chave in (tel_comp if tipo == "telefone" else mail_comp)
+        )
+        if compartilhado:
+            contato = {
+                "tipo": tipo,
+                "valor": valor,
+                "classe": DESCARTADO,
+                "motivo": "mesmo contato aparece em mais de um CNPJ; possível contador/central compartilhada",
+                "fontes": ["receita"],
+            }
+        else:
+            resultado = classificar(tipo, valor, ["receita"], "", lead)
+            contato = {
+                "tipo": tipo,
+                "valor": resultado["valor_exibicao"],
+                "classe": resultado["classe"],
+                "motivo": resultado["motivo"],
+                "fontes": ["receita"],
+            }
+        contatos_avaliados.append(contato)
+
+    tel = next((c["valor"] for c in contatos_avaliados
+                if c["tipo"] == "telefone" and c["classe"] == CONFIRMADO), None)
+    email = next((c["valor"] for c in contatos_avaliados
+                  if c["tipo"] == "email" and c["classe"] == CONFIRMADO), None)
+    if tel or email:
+        status = "confirmado"
+    elif any(c["classe"] == DUVIDOSO for c in contatos_avaliados):
+        status = "so_nao_confirmado"
+    elif contatos_avaliados:
+        status = "so_descartado"
+    else:
+        status = "nenhum"
+
+    return {
+        "telefone": tel,
+        "email": email,
+        "telefone_status": next((c["classe"] for c in contatos_avaliados if c["tipo"] == "telefone"), "nenhum"),
+        "email_status": next((c["classe"] for c in contatos_avaliados if c["tipo"] == "email"), "nenhum"),
+        "contatos": contatos_avaliados,
+        "contato_status": status,
+    }

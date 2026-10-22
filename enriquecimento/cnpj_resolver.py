@@ -36,7 +36,7 @@ from urllib.parse import quote
 
 from classificacao.guardrails import _norm
 from enriquecimento import casadosdados, web
-from enriquecimento.brasilapi import consultar_brasilapi
+from enriquecimento.brasilapi import consultar_cnpj
 from extracao.validacao import cnpj_valido, limpar_cnpj
 
 log = logging.getLogger("cnpj_resolver")
@@ -128,15 +128,34 @@ def estagios(lead: dict, max_consultas: int, buscar, baixar, cdd):
     yield "busca web", web_busca
 
 
-def verificar(cnpj: str, lead: dict, consultar=consultar_brasilapi) -> dict | None:
-    """Confere um candidato na BrasilAPI. Devolve {'cnpj','pontos','confianca','evidencias'}."""
-    d = consultar(cnpj)
-    if not d:
+def verificar(cnpj: str, lead: dict, consultar=consultar_cnpj) -> dict | None:
+    """Confere um candidato no cadastro oficial normalizado.
+
+    consultar_cnpj retorna (registro_normalizado, status).
+    """
+    resultado = consultar(cnpj)
+    if not resultado:
         return None
+
+    # Contrato atual: (registro, status). Aceita também dict para callbacks/testes antigos.
+    if isinstance(resultado, tuple) and len(resultado) == 2:
+        d, status = resultado
+        if status != "ok" or not d:
+            return None
+    else:
+        d = resultado
+    if not isinstance(d, dict):
+        return None
+
     toks = tokens(lead.get("proponente", ""))
     razao = set(tokens(d.get("razao_social") or ""))
     fantasia = set(tokens(d.get("nome_fantasia") or ""))
-    socios = [set(tokens(s.get("nome_socio") or "")) for s in (d.get("qsa") or [])]
+    socios = [set(tokens(nome)) for nome in (d.get("socios") or [])]
+    if not socios:
+        socios = [
+            set(tokens(s.get("nome_socio") or s.get("nome") or ""))
+            for s in (d.get("qsa") or []) if isinstance(s, dict)
+        ]
 
     evid, pontos = [], 0
     nome_na_razao = bool(toks) and len(toks) >= 2 and all(t in razao for t in toks)
@@ -147,8 +166,10 @@ def verificar(cnpj: str, lead: dict, consultar=consultar_brasilapi) -> dict | No
     elif nome_no_qsa:
         pontos += 3
         evid.append("proponente consta no quadro societário")
-    elif toks and len(toks) >= 2 and (sum(t in razao for t in toks) >= len(toks) - 1
-                                      or any(sum(t in s for t in toks) >= len(toks) - 1 for s in socios)):
+    elif toks and len(toks) >= 2 and (
+        sum(t in razao for t in toks) >= len(toks) - 1
+        or any(sum(t in socio for t in toks) >= len(toks) - 1 for socio in socios)
+    ):
         pontos += 1
         evid.append("nome do proponente bate parcialmente")
 
@@ -157,18 +178,20 @@ def verificar(cnpj: str, lead: dict, consultar=consultar_brasilapi) -> dict | No
         pontos += 1
         evid.append("nome da empresa lembra o título do projeto")
 
-    mun_lead, mun_cnpj = _norm(lead.get("municipio", "")), _norm(d.get("municipio") or "")
+    municipio = d.get("municipio_cnpj") or d.get("municipio") or ""
+    mun_lead, mun_cnpj = _norm(lead.get("municipio", "")), _norm(municipio)
     mesmo_mun = bool(mun_lead) and mun_lead == mun_cnpj
     if mesmo_mun:
         pontos += 1
-        evid.append(f"mesmo município ({d.get('municipio')})")
+        evid.append(f"mesmo município ({municipio})")
 
-    ativa = "ativa" in _norm(d.get("descricao_situacao_cadastral") or "")
+    situacao = d.get("situacao_cadastral") or d.get("descricao_situacao_cadastral") or ""
+    ativa = "ativa" in _norm(situacao)
     if ativa:
         evid.append("situação cadastral ativa")
     else:
         pontos -= 3
-        evid.append(f"situação cadastral não ativa ({d.get('descricao_situacao_cadastral')})")
+        evid.append(f"situação cadastral não ativa ({situacao})")
 
     forte = nome_na_razao or nome_no_qsa
     if forte and ativa and (mesmo_mun or nome_no_qsa):
@@ -177,8 +200,10 @@ def verificar(cnpj: str, lead: dict, consultar=consultar_brasilapi) -> dict | No
         conf = "media"
     else:
         conf = "baixa"
-    return {"cnpj": cnpj, "pontos": pontos, "confianca": conf, "evidencias": evid,
-            "razao_social": d.get("razao_social")}
+    return {
+        "cnpj": cnpj, "pontos": pontos, "confianca": conf,
+        "evidencias": evid, "razao_social": d.get("razao_social"),
+    }
 
 
 def _carregar_cache() -> dict:
@@ -198,7 +223,7 @@ def _salvar_cache(c: dict) -> None:
 
 def resolver_cnpj_lead(lead: dict, max_consultas: int = 3, max_verificar: int = 8,
                        buscar=web.buscar_web, baixar=web.baixar,
-                       consultar=consultar_brasilapi, cdd=casadosdados.pesquisar) -> dict:
+                       consultar=consultar_cnpj, cdd=casadosdados.pesquisar) -> dict:
     """Devolve só os campos a acrescentar ao lead."""
     if lead.get("cnpj") and cnpj_valido(lead["cnpj"]):
         return {"cnpj": limpar_cnpj(lead["cnpj"]), "cnpj_status": INFORMADO, "cnpj_confianca": "alta",
