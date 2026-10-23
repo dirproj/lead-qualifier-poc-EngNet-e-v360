@@ -8,3 +8,6 @@ data/cache_classificacao.json
 data/crm_estado.json
 data/cache_cnpj.json
 data/cnpjs_encontrados.csv
+.streamlit/secrets.toml
+data/cache_web/
+data/nao_contatar.csv
