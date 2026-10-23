@@ -116,6 +116,11 @@ class TestCNPJ(unittest.TestCase):
     def test_extrai_so_candidatos_validos(self):
         self.assertEqual(extrair_cnpjs(f"CNPJ 11.222.333/0001-81 lixo 12345678901234 e {OUTRO}"), [MEI, OUTRO])
 
+    def test_bibliotecas_de_busca_nao_logam_o_termo_buscado(self):
+        import logging
+        for nome in ("ddgs", "primp"):
+            self.assertGreaterEqual(logging.getLogger(nome).getEffectiveLevel(), logging.WARNING)
+
     def test_detecta_bloqueio_sem_contornar(self):
         self.assertTrue(bloqueado(200, "<title>Just a moment...</title>"))
         self.assertTrue(bloqueado(429, ""))
