@@ -27,11 +27,13 @@ from pathlib import Path
 from extracao.validacao import cnpj_valido, limpar_cnpj
 from enriquecimento import brasilapi, contatos, identidade
 from enriquecimento.descoberta import Buscador
+from planilha import celula_segura
 
 log = logging.getLogger("enriquecimento")
 
 RAIZ = Path(__file__).resolve().parent.parent
 CSV_PADRAO = RAIZ / "data" / "cnpjs_manuais.csv"
+CSV_NAO_CONTATAR = RAIZ / "data" / "nao_contatar.csv"
 CACHE_PATH = RAIZ / "data" / "cache_cnpj.json"
 MAX_VERIFICAR = 10  # candidatos conferidos por lead (poupa as APIs gratuitas)
 
@@ -69,6 +71,23 @@ def carregar_mapa_cnpj(caminho: Path | str = CSV_PADRAO) -> dict[str, str]:
     return mapa
 
 
+def carregar_nao_contatar(caminho: Path | str = CSV_NAO_CONTATAR) -> tuple[set[str], set[str]]:
+    nomes: set[str] = set()
+    cnpjs: set[str] = set()
+    try:
+        with open(caminho, newline="", encoding="utf-8") as f:
+            for linha in csv.DictReader(f):
+                if linha.get("proponente"):
+                    nomes.add(_chave(linha["proponente"]))
+                if linha.get("cnpj"):
+                    cnpjs.add(limpar_cnpj(linha["cnpj"]))
+    except FileNotFoundError:
+        pass
+    except Exception as e:  # noqa: BLE001
+        log.error("Erro lendo %s: %s", caminho, e)
+    return nomes, cnpjs
+
+
 # ---------------------------------------------------------------
 # Cache (poupa as APIs/sites e deixa a demo estável)
 # ---------------------------------------------------------------
@@ -84,12 +103,15 @@ class Cache:
             except (FileNotFoundError, json.JSONDecodeError):
                 pass
 
-    def salvar(self) -> None:
+    def salvar(self, vinculados: set[str] = frozenset()) -> None:
         if not self.ativo:
             return
+        registros = {cnpj: r if cnpj in vinculados else contatos.minimizar_contatos(r)
+                     for cnpj, r in self.dados["registro"].items()}
         try:
             self.caminho.parent.mkdir(parents=True, exist_ok=True)
-            self.caminho.write_text(json.dumps(self.dados, ensure_ascii=False), encoding="utf-8")
+            self.caminho.write_text(json.dumps({**self.dados, "registro": registros}, ensure_ascii=False),
+                                    encoding="utf-8")
         except OSError as e:
             log.warning("Não consegui salvar o cache de CNPJ: %s", e)
 
@@ -126,8 +148,6 @@ def _resumo(cnpj: str, registro: dict, ident: dict) -> dict:
 def _resolver(lead: dict, mapa: dict, buscador, consulta, cache: Cache, uf_alvo: str):
     """Devolve (campos_para_o_lead, registro|None, identidade|None)."""
     proponente = lead.get("proponente", "")
-    titulo = lead.get("titulo_projeto", "")
-    print(f"DEBUG RESOLVER: proponente='{proponente}', titulo='{titulo}")
     cnpj = lead.get("cnpj") or mapa.get(_chave(proponente))
 
     # ---- caminho 1: CNPJ informado pela equipe ----
@@ -178,7 +198,7 @@ def _resolver(lead: dict, mapa: dict, buscador, consulta, cache: Cache, uf_alvo:
                      "cnpj_candidatos": [_resumo(c, r, i) for c, r, i in aceitos[:3]]}, None, None)
         c, registro, ident = topo
         return ({"cnpj": c, "cnpj_origem": "automatico", "cnpj_confianca": ident["confianca"],
-                 "cnpj_evidencia": "; ".join(ident["motivos"]),
+                 "cnpj_evidencia": "; ".join(ident["motivos"]), "cnpj_alerta": ident.get("alerta"),
                  "status_enriquecimento": OK}, registro, ident)
 
     fracos = [a for a in avaliados if a[2]["confianca"] == "baixa"]
@@ -214,8 +234,11 @@ def _completar_contato_pelo_site(registro: dict, buscador) -> None:
 # ---------------------------------------------------------------
 def enriquecer_leads(leads: list[dict], mapa_cnpj: dict[str, str] | None = None,
                      automatico: bool = True, uf_alvo: str = "DF", usar_cache: bool = True,
-                     buscador=None, consulta=None, pausa: float = 0.3) -> list[dict]:
+                     buscador=None, consulta=None, pausa: float = 0.3,
+                     nao_contatar: tuple[set[str], set[str]] | None = None) -> list[dict]:
     mapa = carregar_mapa_cnpj() if mapa_cnpj is None else mapa_cnpj
+    nomes_bloqueados, cnpjs_bloqueados = carregar_nao_contatar() if nao_contatar is None else nao_contatar
+    bloqueados = 0
     consulta = consulta or brasilapi.consultar_cnpj
     cache = Cache(usar_cache)
 
@@ -229,7 +252,17 @@ def enriquecer_leads(leads: list[dict], mapa_cnpj: dict[str, str] | None = None,
     try:
         for lead in leads:
             lead = dict(lead)
+            if _chave(lead.get("proponente", "")) in nomes_bloqueados:
+                bloqueados += 1
+                continue
             campos, registro, ident = _resolver(lead, mapa, buscador, consulta, cache, uf_alvo)
+            if campos.get("cnpj") in cnpjs_bloqueados:
+                bloqueados += 1
+                continue
+            if registro and registro.get("contatos_minimizados"):
+                atualizado, _ = consulta(campos["cnpj"])
+                if atualizado:
+                    registro = cache.dados["registro"][campos["cnpj"]] = atualizado
             if registro:
                 if buscador is not None:
                     _completar_contato_pelo_site(registro, buscador)
@@ -241,7 +274,7 @@ def enriquecer_leads(leads: list[dict], mapa_cnpj: dict[str, str] | None = None,
     finally:
         if proprio:
             proprio.fechar()
-        cache.salvar()
+        cache.salvar({r["cnpj"] for _, r, _ in resultados if r})
 
     # ---- 2ª passada: contatos (precisa ver todos os CNPJs para achar números compartilhados) ----
     # Considera TODOS os cadastros consultados (inclusive candidatos rejeitados): um contador
@@ -261,6 +294,8 @@ def enriquecer_leads(leads: list[dict], mapa_cnpj: dict[str, str] | None = None,
     for l in saida:
         cont[l["status_enriquecimento"]] = cont.get(l["status_enriquecimento"], 0) + 1
     com_tel = sum(1 for l in saida if l.get("telefone"))
+    if bloqueados:
+        log.info("%d leads fora da coleta por estarem em %s", bloqueados, CSV_NAO_CONTATAR.name)
     log.info("CNPJ: %s | telefones confirmados: %d | e-mails confirmados: %d",
              cont, com_tel, sum(1 for l in saida if l.get("email")))
     return saida
@@ -272,7 +307,7 @@ def enriquecer_leads(leads: list[dict], mapa_cnpj: dict[str, str] | None = None,
 CSV_ENCONTRADOS = RAIZ / "data" / "cnpjs_encontrados.csv"
 _COLUNAS_RELATORIO = (
     "proponente", "titulo_projeto", "status_enriquecimento", "cnpj", "razao_social",
-    "cnpj_origem", "cnpj_confianca", "cnpj_evidencia", "telefone", "telefone_status",
+    "cnpj_origem", "cnpj_confianca", "cnpj_evidencia", "cnpj_alerta", "telefone", "telefone_status",
     "telefone_obs", "email", "email_status", "email_obs",
 )
 
@@ -287,7 +322,7 @@ def exportar_cnpjs_encontrados(leads: list[dict], caminho: Path | str = CSV_ENCO
             w = csv.DictWriter(f, fieldnames=_COLUNAS_RELATORIO, delimiter=";", extrasaction="ignore")
             w.writeheader()
             for l in leads:
-                w.writerow({c: ("" if l.get(c) is None else l.get(c)) for c in _COLUNAS_RELATORIO})
+                w.writerow({c: ("" if l.get(c) is None else celula_segura(l.get(c))) for c in _COLUNAS_RELATORIO})
         return caminho
     except OSError as e:
         log.warning("Não consegui gravar %s: %s", caminho, e)
@@ -313,14 +348,12 @@ def diagnosticar(proponente: str, titulo: str, uf: str) -> None:
                 print(f"  - {d}")
             candidatos += [c for c in achados if c not in candidatos]
         print(f"\n{len(candidatos)} candidatos distintos. Conferindo os {min(len(candidatos), MAX_VERIFICAR)} primeiros no cadastro oficial:\n")
-        avaliados = []
         for c in candidatos[:MAX_VERIFICAR]:
-            registro, _ = _registro(c, consulta, cache)
-            print(f"DEBUG REGISTRO: CNPJ={c}, registro={'SIM' if registro else 'NAO'}, status={_}")
-            if registro:
-                ident = identidade.avaliar(lead, registro, uf_alvo)
-                print(f"DEBUG IDENTIDADE: CNPJ={c}, razao={registro.get('razao_social')}, confianca={ident['confianca']}, motivos={ident['motivos']}, rejeicao={ident.get('rejeicao')}")
-                avaliados.append((c, registro, ident))
+            registro, status = _registro(c, brasilapi.consultar_cnpj, cache)
+            if not registro:
+                print(f"  {c}  [cadastro indisponível: {status}]")
+                continue
+            ident = identidade.avaliar(lead, registro, uf)
             veredito = ident["confianca"] or "REJEITADO"
             print(f"  {c}  {registro.get('razao_social')}  [{veredito}]")
             print(f"      {'; '.join(ident['motivos']) or '-'}  {('| ' + ident['rejeicao']) if ident['rejeicao'] else ''}")

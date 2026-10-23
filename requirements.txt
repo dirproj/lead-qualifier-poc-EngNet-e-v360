@@ -1,7 +1,7 @@
 playwright
 pdfplumber
 requests
-openai
+google-genai
 python-dotenv
 streamlit>=1.40
 pandas

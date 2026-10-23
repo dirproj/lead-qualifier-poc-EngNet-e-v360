@@ -20,13 +20,19 @@ Diagnósticos úteis:
 import argparse
 import json
 import logging
+import shutil
 from pathlib import Path
 
 from extracao.scraper import coletar_leads, adicionar_args_cli, aplicar_args_cli
 from enriquecimento.orquestrador import enriquecer_leads, exportar_cnpjs_encontrados
 from classificacao.llm import classificar_leads
 
-SAIDA = Path(__file__).resolve().parent / "data" / "leads_processados.json"
+DIR_DADOS = Path(__file__).resolve().parent / "data"
+SAIDA = DIR_DADOS / "leads_processados.json"
+ARQUIVOS_COM_DADOS_PESSOAIS = (
+    "leads_processados.json", "cache_classificacao.json", "cache_cnpj.json",
+    "crm_estado.json", "cnpjs_encontrados.csv",
+)
 
 def _ordem(lead: dict):
     nota = lead.get("nota_fit")
@@ -37,6 +43,7 @@ def rodar(pdf=None, pagina=None, palavras=None, limite=1, demo=False,
           sem_ia=False, max_ia=None, busca_cnpj=True, uf="DF", cache_cnpj=True) -> list[dict]:
     leads = coletar_leads(pdf=pdf, pagina=pagina, palavras_chave=palavras,
                           limite_pdfs=limite, demo=demo)                     # Etapa 1
+    leads = [{**lead, "uf_edital": uf.upper()} for lead in leads]
     leads = enriquecer_leads(leads, automatico=busca_cnpj, uf_alvo=uf,
                              usar_cache=cache_cnpj)                          # Etapa 2
     exportar_cnpjs_encontrados(leads)    # data/cnpjs_encontrados.csv (para auditar a busca)
@@ -50,6 +57,17 @@ def rodar(pdf=None, pagina=None, palavras=None, limite=1, demo=False,
     return leads
 
 
+def apagar_dados_locais() -> list[Path]:
+    apagados = [DIR_DADOS / nome for nome in ARQUIVOS_COM_DADOS_PESSOAIS if (DIR_DADOS / nome).exists()]
+    apagados += list((DIR_DADOS / "brutos").glob("*.pdf"))
+    for arquivo in apagados:
+        arquivo.unlink()
+    if (DIR_DADOS / "cache_web").exists():
+        shutil.rmtree(DIR_DADOS / "cache_web")
+        apagados.append(DIR_DADOS / "cache_web")
+    return apagados
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
     ap = argparse.ArgumentParser()
@@ -59,7 +77,13 @@ if __name__ == "__main__":
     ap.add_argument("--sem-busca-cnpj", action="store_true", help="não procura CNPJ na web (usa só o CSV manual)")
     ap.add_argument("--sem-cache-cnpj", action="store_true", help="ignora o cache de buscas/cadastros")
     ap.add_argument("--uf", default="DF", help="UF do edital, usada para conferir o CNPJ (padrão DF)")
+    ap.add_argument("--apagar-dados", action="store_true",
+                    help="apaga leads, caches, CRM e PDFs baixados em data/ e sai")
     a = ap.parse_args()
+    if a.apagar_dados:
+        removidos = apagar_dados_locais()
+        print("\n".join(f"apagado: {r.relative_to(DIR_DADOS.parent)}" for r in removidos) or "nada a apagar")
+        raise SystemExit(0)
     rodar(pdf=a.pdf, pagina=a.pagina, palavras=aplicar_args_cli(a), limite=a.limite,
           demo=a.demo, sem_ia=a.sem_ia, max_ia=a.max_ia, busca_cnpj=not a.sem_busca_cnpj,
           uf=a.uf, cache_cnpj=not a.sem_cache_cnpj)

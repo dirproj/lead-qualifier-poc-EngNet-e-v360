@@ -39,6 +39,7 @@ import pandas as pd
 import streamlit as st
 
 from classificacao.perfil import CATALOGO_SERVICOS
+from planilha import celula_segura
 
 RAIZ = Path(__file__).resolve().parent
 ARQ_LEADS = RAIZ / "data" / "leads_processados.json"
@@ -65,7 +66,7 @@ FAIXAS = ["alto", "medio", "baixo", "sem nota"]
 ICONE_FAIXA = {"alto": "🟢", "medio": "🟡", "baixo": "🔴", "sem nota": "⚪"}
 ROTULO_STATUS_IA = {
     "ok": " ok", "revisar": " revisar", "falha": " falha",
-    "sem_chave": " sem chave", "nao_processado": "⏸ não processado",
+    "sem_chave": " sem chave", "nao_processado": "⏸ não processado", "regras": " regras (sem IA)",
 }
 ROTULO_ENRIQ = {
     "ok": " CNPJ vinculado", "sem_cnpj": "— sem CNPJ", "cnpj_invalido": " CNPJ inválido",
@@ -180,13 +181,13 @@ class ExecucaoPipeline:
             return 0.0
         return (self.fim or time.time()) - self.inicio
 
-    def iniciar(self, url: str, max_ia: int | None) -> str | None:
+    def iniciar(self, url: str, uf: str, max_ia: int | None) -> str | None:
         """Dispara a coleta. Devolve uma mensagem de erro, ou None se deu certo."""
         with self._trava:
             if self.rodando:
                 return "Já existe uma busca em andamento."
             # Lista de argumentos (sem shell): a URL nunca é interpretada como comando.
-            cmd = [sys.executable, "-u", str(ARQ_PIPELINE), "--pagina", url]
+            cmd = [sys.executable, "-u", str(ARQ_PIPELINE), "--pagina", url, "--uf", uf]
             if max_ia:
                 cmd += ["--max-ia", str(max_ia)]
             env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
@@ -308,7 +309,7 @@ def painel_coleta() -> None:
         if modo == MODO_TESTE:
             max_ia = int(st.number_input(
                 "Máximo de chamadas à IA", min_value=1, max_value=50, value=3, step=1, key="coleta_max_ia",
-                help="Os demais leads aparecem como 'não processado', sem nota de fit.",
+                help="Os demais leads recebem a nota por regras de palavras-chave, marcada como 'regras (sem IA)'.",
             ))
         else:
             liberado = st.checkbox(
@@ -320,7 +321,7 @@ def painel_coleta() -> None:
                        "sem classificação da IA (status “sem chave”).")
 
         if st.button("▶ Buscar leads", type="primary", disabled=not liberado, key="btn_buscar_leads"):
-            erro = exe.iniciar(URL_CENTELHA.format(uf=uf.lower()), max_ia)
+            erro = exe.iniciar(URL_CENTELHA.format(uf=uf.lower()), uf, max_ia)
             if erro:
                 st.error(erro)
             else:
@@ -373,7 +374,7 @@ def barra_lateral(leads: list[dict]) -> dict:
 
 def estado_da_lead(lead: dict) -> str:
     """Identifica a UF da lead a partir dos campos disponíveis no JSON."""
-    chaves_estado = ("uf", "estado_uf", "sigla_uf", "estado", "unidade_federativa")
+    chaves_estado = ("uf_edital", "uf", "estado_uf", "sigla_uf", "estado", "unidade_federativa")
     for chave in chaves_estado:
         valor = lead.get(chave)
         if not valor:
@@ -488,6 +489,7 @@ def exportar_csv(leads: list[dict], crm: dict, mostrar_proponente: bool) -> byte
             "justificativa": l.get("justificativa"), "status_ia": l.get("status_ia"),
             "cnpj": l.get("cnpj"), "razao_social": l.get("razao_social"),
             "cnpj_origem": l.get("cnpj_origem"), "cnpj_confianca": l.get("cnpj_confianca"),
+            "cnpj_alerta": l.get("cnpj_alerta"),
             "cnae": l.get("cnae_descricao"), "porte": l.get("porte"),
             "telefone": l.get("telefone"), "telefone_status": l.get("telefone_status"),
             "telefone_obs": l.get("telefone_obs"),
@@ -497,7 +499,7 @@ def exportar_csv(leads: list[dict], crm: dict, mostrar_proponente: bool) -> byte
         })
         linhas.append(linha)
     # utf-8-sig + ';' para abrir direto no Excel em português
-    return pd.DataFrame(linhas).to_csv(index=False, sep=";").encode("utf-8-sig")
+    return pd.DataFrame(linhas).map(celula_segura).to_csv(index=False, sep=";").encode("utf-8-sig")
 
 
 # ---------------------------------------------------------------
@@ -521,6 +523,8 @@ def painel_detalhe(lead: dict, crm: dict, mostrar_proponente: bool) -> None:
         m2.metric("Faixa", f"{ICONE_FAIXA[faixa]} {faixa}")
         m3.metric("Confiança", lead.get("confianca") or "—")
 
+        if lead.get("status_ia") == "regras":
+            st.info("; ".join(lead.get("avisos_ia") or ["nota calculada por regras, não pela IA"]))
         if lead.get("justificativa"):
             st.markdown("**Por que essa nota**")
             st.write(lead["justificativa"])
@@ -547,6 +551,8 @@ def painel_detalhe(lead: dict, crm: dict, mostrar_proponente: bool) -> None:
             origem = {"automatico": "busca automática", "manual": "informado pela equipe"}.get(lead.get("cnpj_origem"), "—")
             st.caption(f"Como foi encontrado: {origem} · confiança {lead.get('cnpj_confianca') or '—'}. "
                        f"{lead.get('cnpj_evidencia') or ''}")
+            if lead.get("cnpj_alerta"):
+                st.warning(f"Vínculo fraco: {lead['cnpj_alerta']}")
         else:
             st.info(f"CNPJ não vinculado ({ROTULO_ENRIQ.get(lead.get('status_enriquecimento'), '—')}). "
                     f"{lead.get('cnpj_evidencia') or ''}")

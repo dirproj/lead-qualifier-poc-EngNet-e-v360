@@ -19,6 +19,7 @@ existe, fica só em `telefone_candidato`, rotulado).
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections import defaultdict
 
@@ -138,20 +139,43 @@ def email_com_nome_da_pessoa(email: str, proponente: str | None) -> bool:
 # ---------------------------------------------------------------
 # Compartilhamento entre CNPJs (sinal de contador/escritório)
 # ---------------------------------------------------------------
+def impressao(valor: str) -> str:
+    return hashlib.sha256(valor.encode("utf-8")).hexdigest()
+
+
+def impressao_telefone(bruto: str) -> str | None:
+    digitos = analisar_telefone(bruto)["digitos"]
+    return impressao(digitos) if digitos else None
+
+
+def impressao_email(bruto: str) -> str:
+    return impressao(str(bruto).strip().lower())
+
+
 def contatos_compartilhados(registros: list[dict]) -> tuple[set[str], set[str]]:
-    """Telefones/e-mails que aparecem em 2+ CNPJs-raiz diferentes."""
+    """Impressões de telefones/e-mails que aparecem em 2+ CNPJs-raiz diferentes."""
     tel: dict[str, set[str]] = defaultdict(set)
     mail: dict[str, set[str]] = defaultdict(set)
     for r in registros:
         raiz = (r.get("cnpj") or "")[:8]
-        for t in r.get("telefones") or []:
-            d = analisar_telefone(t)["digitos"]
-            if d:
-                tel[d].add(raiz)
-        if r.get("email"):
-            mail[str(r["email"]).strip().lower()].add(raiz)
+        impressoes_tel = [impressao_telefone(t) for t in r.get("telefones") or []]
+        for i in impressoes_tel + list(r.get("telefones_impressao") or []):
+            if i:
+                tel[i].add(raiz)
+        impressoes_mail = [impressao_email(r["email"])] if r.get("email") else []
+        for i in impressoes_mail + list(r.get("email_impressao") or []):
+            mail[i].add(raiz)
     return ({k for k, v in tel.items() if len(v) >= 2},
             {k for k, v in mail.items() if len(v) >= 2})
+
+
+def minimizar_contatos(registro: dict) -> dict:
+    if registro.get("contatos_minimizados"):
+        return registro
+    telefones = [i for i in (impressao_telefone(t) for t in registro.get("telefones") or []) if i]
+    email = [impressao_email(registro["email"])] if registro.get("email") else []
+    return {**registro, "telefones": [], "email": None, "telefones_impressao": telefones,
+            "email_impressao": email, "contatos_minimizados": True}
 
 
 # ---------------------------------------------------------------
@@ -202,7 +226,8 @@ def avaliar_contato(registro: dict, identidade: dict, lead: dict,
     for bruto in registro.get("telefones") or []:
         a = analisar_telefone(bruto)
         status, obs, conf = _decidir(
-            a, terceiro, a["digitos"] in tel_compartilhados, vinculo_ok, corrobora, titular_exato)
+            a, terceiro, bool(a["digitos"]) and impressao(a["digitos"]) in tel_compartilhados,
+            vinculo_ok, corrobora, titular_exato)
         opcoes.append((_PRIORIDADE[status], status, obs, conf, a))
     if opcoes:
         _, status, obs, conf, a = min(opcoes, key=lambda o: o[0])
@@ -225,7 +250,7 @@ def avaliar_contato(registro: dict, identidade: dict, lead: dict,
             st, ob, cf = em["status"], f"e-mail {em['status']}: {em['motivo']}", None
         else:
             st, ob, cf = _decidir(
-                {"status": "completo"}, terceiro, em["email"] in email_compartilhados,
+                {"status": "completo"}, terceiro, impressao_email(em["email"]) in email_compartilhados,
                 vinculo_ok, corrobora, titular_exato)
             ob = ob.replace("número", "e-mail")
         email = {
