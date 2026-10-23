@@ -45,6 +45,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 log = logging.getLogger("descoberta")
+logging.getLogger("ddgs").setLevel(logging.WARNING)
 
 USER_AGENT = "LeadQualifierPoC/1.0 (projeto academico de empresa junior; uso moderado)"
 TAMANHO_MAX_PAGINA = 600_000
