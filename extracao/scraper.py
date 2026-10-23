@@ -45,10 +45,8 @@ log = logging.getLogger("extracao")
 RAIZ = Path(__file__).resolve().parent.parent
 DIR_BRUTOS = RAIZ / "data" / "brutos"
 
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-)
+USER_AGENT = "LeadQualifierPoC/1.0 (projeto academico de empresa junior; uso moderado)"
+TAMANHO_MAX_PDF = 20 * 1024 * 1024
 
 # Posição de cada campo na linha da tabela (0 = coluna "Nº").
 # AJUSTE aqui se o PDF do seu estado tiver outra ordem de colunas.
@@ -163,11 +161,14 @@ def baixar_pdf(url: str, timeout: int = 30) -> Path | None:
     destino = DIR_BRUTOS / nome
 
     try:
-        resp = requests.get(url_real, timeout=timeout, headers={"User-Agent": USER_AGENT})
-        resp.raise_for_status()
-        if not resp.content.startswith(b"%PDF"):
+        with requests.get(url_real, timeout=timeout, stream=True, headers={"User-Agent": USER_AGENT}) as resp:
+            resp.raise_for_status()
+            conteudo = resp.raw.read(TAMANHO_MAX_PDF + 1, decode_content=True)
+        if len(conteudo) > TAMANHO_MAX_PDF:
+            raise ValueError(f"o arquivo passa de {TAMANHO_MAX_PDF // (1024 * 1024)} MB")
+        if not conteudo.startswith(b"%PDF"):
             raise ValueError("a resposta não é um PDF (link restrito, pede login ou confirmação)")
-        destino.write_bytes(resp.content)
+        destino.write_bytes(conteudo)
         log.info("PDF baixado: %s", destino.name)
         return destino
     except (requests.RequestException, ValueError) as e:

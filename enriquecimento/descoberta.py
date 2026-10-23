@@ -46,10 +46,8 @@ load_dotenv()
 
 log = logging.getLogger("descoberta")
 
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-)
+USER_AGENT = "LeadQualifierPoC/1.0 (projeto academico de empresa junior; uso moderado)"
+TAMANHO_MAX_PAGINA = 600_000
 CDD_BASE = "https://casadosdados.com.br"
 
 FONTES_BUSCA = (
@@ -176,12 +174,14 @@ class Buscador:
                                  headers={"User-Agent": USER_AGENT})
                 if r.status_code == 200:
                     rp.parse(r.text.splitlines())
-                else:
+                elif 400 <= r.status_code < 500:
                     rp.allow_all = True
+                else:
+                    rp.disallow_all = True
             except requests.RequestException:
-                rp.allow_all = True
+                rp.disallow_all = True
             self._robots[p.netloc] = rp
-        return rp.can_fetch("*", url)
+        return rp.can_fetch(USER_AGENT, url)
 
     def _esperar(self, host: str) -> None:
         falta = self.intervalo - (time.monotonic() - self._ultimo.get(host, 0.0))
@@ -217,13 +217,15 @@ class Buscador:
             except Exception:
                 pass
             conteudo = pagina.inner_text("body") if texto else pagina.content()
-            return (resp.status if resp else 0), conteudo
+            return (resp.status if resp else 0), conteudo[:TAMANHO_MAX_PAGINA]
         finally:
             pagina.close()
 
     def _html_http(self, url: str) -> tuple[int, str]:
-        r = requests.get(url, timeout=20, headers={"User-Agent": USER_AGENT, "Accept-Language": "pt-BR,pt;q=0.9"})
-        return r.status_code, r.text
+        with requests.get(url, timeout=20, stream=True,
+                          headers={"User-Agent": USER_AGENT, "Accept-Language": "pt-BR,pt;q=0.9"}) as r:
+            corpo = r.raw.read(TAMANHO_MAX_PAGINA, decode_content=True)
+            return r.status_code, corpo.decode(r.encoding or "utf-8", errors="replace")
 
     def _buscar_cdd_site(self, f: dict, termo: str, diag: list[str]) -> list[str]:
         url = f["url"].format(termo_plus=quote_plus(termo.strip()))
