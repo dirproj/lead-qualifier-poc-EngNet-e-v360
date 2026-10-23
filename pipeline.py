@@ -28,7 +28,6 @@ from classificacao.llm import classificar_leads
 
 SAIDA = Path(__file__).resolve().parent / "data" / "leads_processados.json"
 
-
 def _ordem(lead: dict):
     nota = lead.get("nota_fit")
     return (nota is None, -(nota or 0))  # maiores notas primeiro, sem nota por último

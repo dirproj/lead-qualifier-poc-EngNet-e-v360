@@ -49,7 +49,7 @@ SCHEMA = {
         "nota_fit", "confianca", "dados_insuficientes",
         "justificativa", "servicos_sugeridos", "evidencias",
     ],
-    "additionalProperties": False,
+    #"additionalProperties": False,
 }
 
 

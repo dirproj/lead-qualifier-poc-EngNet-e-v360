@@ -1,378 +1,239 @@
 """
-COLETA DE CONTATOS (telefone e e-mail) COM REGRA DE CONFIANÇA
+CONTATO: telefone e e-mail só entram na planilha se forem CLARAMENTE
+da pessoa, da startup ou do laboratório dela.
 =====================================================================
-REGRA PRINCIPAL: um telefone/e-mail só vai para os campos principais
-(`telefone_confirmado`, `email_confirmado`) se estiver COMPLETO e for
-CLARAMENTE da pessoa, da startup ou do laboratório dela. Todo o resto fica
-registrado em `contatos`, com a classe e o MOTIVO escritos:
+Regra do projeto: um contato só vai para a coluna principal
+(`telefone` / `email`) quando TODAS as condições valem:
+  1. está completo (sem dígitos ocultos, DDD válido, 8 ou 9 dígitos);
+  2. não é de contabilidade, coworking, recepção ou condomínio;
+  3. não se repete em CNPJs diferentes (sinal de contador/escritório);
+  4. o CNPJ foi vinculado ao proponente/startup (ver identidade.py);
+  5. há corroboração: e-mail no domínio da própria startup/pessoa, ou o
+     CNPJ é de MEI/empresário individual com o NOME do proponente.
 
-  confirmado  -> completo e com prova de titularidade
-  duvidoso    -> completo, mas ninguém prova que é da pessoa/startup
-                 (ex.: só consta no cadastro da Receita, que costuma trazer o
-                 contador). Aparece no painel como "não confirmado".
-  descartado  -> mascarado/incompleto, ou de contabilidade, coworking,
-                 recepção/central de atendimento
-
-Fontes, da mais forte para a mais fraca:
-  1. site próprio da startup (descoberto por busca + conferido no conteúdo);
-  2. e-mail com o nome do titular ou no domínio do site próprio;
-  3. cadastro da Receita (BrasilAPI) e sites agregadores (cnpj.biz, Casa dos
-     Dados...). Os agregadores só espelham a Receita, então NÃO contam como
-     confirmação independente. Dígitos escondidos por "cadastre-se" ficam como
-     "mascarado": não há tentativa de burlar o acesso.
+Qualquer outro caso NÃO vai para a coluna principal. O motivo fica
+explícito em `telefone_status` / `telefone_obs` (e o número, quando
+existe, fica só em `telefone_candidato`, rotulado).
 =====================================================================
 """
 
 from __future__ import annotations
 
-import logging
 import re
+from collections import defaultdict
 
-from bs4 import BeautifulSoup
+from enriquecimento.identidade import nome_da_startup, normalizar_nome, _tokens
 
-from classificacao.guardrails import _norm
-from enriquecimento import web
-from enriquecimento.cnpj_resolver import tokens
+DDDS_VALIDOS = {
+    11, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 24, 27, 28, 31, 32, 33, 34, 35, 37, 38,
+    41, 42, 43, 44, 45, 46, 47, 48, 49, 51, 53, 54, 55, 61, 62, 63, 64, 65, 66, 67, 68, 69,
+    71, 73, 74, 75, 77, 79, 81, 82, 83, 84, 85, 86, 87, 88, 89, 91, 92, 93, 94, 95, 96, 97, 98, 99,
+}
+PALAVRAS_CONTABILIDADE = (
+    "contab", "contador", "contabil", "assessoria", "fiscal", "bpo", "tributar",
+    "legaliza", "despachante", "escritorio", "abertura",
+)
+PALAVRAS_COWORKING = (
+    "cowork", "recepcao", "portaria", "condominio", "predial", "administradora",
+    "businesscenter", "centroempresarial", "virtualoffice", "salacomercial",
+)
+PROVEDORES_GRATIS = {
+    "gmail", "hotmail", "outlook", "yahoo", "live", "icloud", "bol", "uol",
+    "terra", "ig", "globo", "protonmail", "msn", "me",
+}
+_RE_MASCARA = re.compile(r"[*•#_·●]|[xX]{2,}")
+_RE_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
-log = logging.getLogger("contatos")
-
-CONFIRMADO, DUVIDOSO, DESCARTADO = "confirmado", "duvidoso", "descartado"
-
-DDDS = {11, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 24, 27, 28, 31, 32, 33, 34, 35, 37, 38,
-        41, 42, 43, 44, 45, 46, 47, 48, 49, 51, 53, 54, 55, 61, 62, 63, 64, 65, 66, 67, 68, 69,
-        71, 73, 74, 75, 77, 79, 81, 82, 83, 84, 85, 86, 87, 88, 89, 91, 92, 93, 94, 95, 96, 97, 98, 99}
-
-TERMOS_CONTABILIDADE = ("contabil", "contador", "contabilista", "assessoria", "escritorio contabil",
-                        "bpo", "abertura de empresa", "fiscal")
-TERMOS_COWORKING = ("coworking", "cowork", "escritorio virtual", "endereco fiscal",
-                    "espaco compartilhado", "sala compartilhada", "hub de")
-TERMOS_RECEPCAO = ("recepcao", "portaria", "secretaria", "telefonista", "central de atendimento",
-                   "sac", "ramal", "atendimento ao cliente", "ouvidoria")
-EMAIL_GENERICO_RECEPCAO = ("recepcao", "portaria", "secretaria", "sac", "ouvidoria", "atendimento")
-DOMINIOS_LIVRES = ("gmail.com", "hotmail.com", "outlook.com", "yahoo.com", "yahoo.com.br",
-                   "uol.com.br", "bol.com.br", "icloud.com", "live.com", "msn.com", "proton.me")
-RE_INSTITUCIONAL = re.compile(r"\.edu\.br$|\.gov\.br$|(^|\.)(unb|usp|unicamp|unesp|ifb|ufg|ufmg|ufrj|ufsc|ufpe|ufba|ufrgs|ufc|ufpr)\.br$")
-
-RE_EMAIL = re.compile(r"[A-Za-z0-9._%+\-*]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
-RE_TEL = re.compile(r"(?:\+?55\s*)?\(?\d{2}\)?[\s.\-]*(?:9[\s.\-]?)?[\d*xX•●#]{4}[\s.\-]?[\d*xX•●#]{4}")
-RE_MASCARA = re.compile(r"[*xX•●#]{2,}|…|\.{3}")
+# prioridade ao escolher entre vários números/e-mails do mesmo cadastro
+_PRIORIDADE = {"confirmado": 0, "nao_confirmado": 1, "compartilhado": 2, "contabilidade": 3,
+               "coworking": 3, "mascarado": 4, "incompleto": 5, "invalido": 5}
 
 
 # ---------------------------------------------------------------
-# Normalização de telefone
+# Telefone
 # ---------------------------------------------------------------
-def analisar_telefone(texto: str) -> dict:
-    """{'estado': 'completo'|'mascarado'|'incompleto'|'central', 'normalizado', 'formatado'}"""
-    bruto = (texto or "").strip()
-    if RE_MASCARA.search(bruto):
-        return {"estado": "mascarado", "normalizado": None, "formatado": bruto}
-    d = re.sub(r"\D", "", bruto)
-    if d.startswith("0800") or (d.startswith(("4003", "4004", "3003")) and len(d) == 8):
-        return {"estado": "central", "normalizado": None, "formatado": bruto}
-    if d.startswith("55") and len(d) in (12, 13):
+def analisar_telefone(bruto: str | None) -> dict:
+    """Valida a FORMA do número. status: completo | mascarado | incompleto | invalido."""
+    texto = str(bruto or "").strip()
+    if _RE_MASCARA.search(texto):
+        return {"status": "mascarado", "digitos": "", "tipo": None, "formatado": texto,
+                "motivo": "dígitos ocultos"}
+    d = re.sub(r"\D", "", texto)
+    if len(d) in (11, 12) and d.startswith("0"):
+        d = d[1:]
+    if len(d) in (12, 13) and d.startswith("55"):
         d = d[2:]
-    if len(d) not in (10, 11) or int(d[:2]) not in DDDS:
-        return {"estado": "incompleto", "normalizado": None, "formatado": bruto}
-    if len(d) == 11 and d[2] != "9":
-        return {"estado": "incompleto", "normalizado": None, "formatado": bruto}
-    if len(d) == 10 and d[2] not in "2345":
-        return {"estado": "incompleto", "normalizado": None, "formatado": bruto}
-    fmt = f"({d[:2]}) {d[2:7]}-{d[7:]}" if len(d) == 11 else f"({d[:2]}) {d[2:6]}-{d[6:]}"
-    return {"estado": "completo", "normalizado": d, "formatado": fmt}
-
-
-# ---------------------------------------------------------------
-# Extração de uma página
-# ---------------------------------------------------------------
-def extrair_contatos_html(html: str, janela: int = 90) -> list[dict]:
-    """[{'tipo','valor','contexto'}] a partir de links tel:/mailto: e do texto."""
-    soup = BeautifulSoup(html or "", "html.parser")
-    for t in soup(["script", "style", "noscript"]):
-        t.decompose()
-    achados: list[dict] = []
-
-    for a in soup.select("a[href^='tel:'], a[href^='mailto:']"):
-        href = a.get("href", "")
-        tipo = "telefone" if href.startswith("tel:") else "email"
-        valor = href.split(":", 1)[1].split("?")[0].strip()
-        ctx = (a.parent.get_text(" ", strip=True) if a.parent else a.get_text(" ", strip=True))[:2 * janela]
-        achados.append({"tipo": tipo, "valor": valor, "contexto": ctx})
-
-    texto = soup.get_text(" ", strip=True)
-    for m in RE_EMAIL.finditer(texto):
-        achados.append({"tipo": "email", "valor": m.group(), "contexto": texto[max(0, m.start() - janela):m.end() + janela]})
-    for m in RE_TEL.finditer(texto):
-        achados.append({"tipo": "telefone", "valor": m.group().strip(),
-                        "contexto": texto[max(0, m.start() - janela):m.end() + janela]})
-    return achados
-
-
-# ---------------------------------------------------------------
-# Classificação (a regra do usuário)
-# ---------------------------------------------------------------
-def _tem(termos, texto_norm: str) -> str | None:
-    for t in termos:
-        # termos curtos ("sac", "bpo") só valem como palavra inteira
-        padrao = r"\b" + re.escape(t) + (r"\b" if len(t) <= 4 else "")
-        if re.search(padrao, texto_norm):
-            return t
-    return None
-
-
-def classificar(tipo: str, valor: str, fontes: list[str], contexto: str, lead: dict) -> dict:
-    """Devolve {'classe', 'motivo', 'valor_exibicao'}."""
-    ctx = _norm(contexto)
-    endereco = _norm(" ".join(str(lead.get(c) or "") for c in ("logradouro_cnpj", "complemento_cnpj")))
-    site = web.dominio(lead.get("site_proprio") or "")
-
-    # --- 1. completo?
-    if tipo == "telefone":
-        a = analisar_telefone(valor)
-        if a["estado"] == "mascarado":
-            return {"classe": DESCARTADO, "motivo": "número com dígitos escondidos (mascarado)", "valor_exibicao": a["formatado"]}
-        if a["estado"] == "incompleto":
-            return {"classe": DESCARTADO, "motivo": "número incompleto ou inválido", "valor_exibicao": a["formatado"]}
-        if a["estado"] == "central":
-            return {"classe": DESCARTADO, "motivo": "central de atendimento (0800/4003)", "valor_exibicao": a["formatado"]}
-        exibicao = a["formatado"]
-        dominio_email = ""
-        local = ""
+    if len(d) in (8, 9):
+        return {"status": "incompleto", "digitos": d, "tipo": None, "formatado": texto,
+                "motivo": "sem DDD"}
+    if len(d) not in (10, 11):
+        return {"status": "incompleto", "digitos": d, "tipo": None, "formatado": texto,
+                "motivo": "quantidade de dígitos incompleta"}
+    ddd, numero = int(d[:2]), d[2:]
+    if ddd not in DDDS_VALIDOS:
+        return {"status": "invalido", "digitos": d, "tipo": None, "formatado": texto,
+                "motivo": f"DDD {ddd} inexistente"}
+    if len(set(numero)) == 1 or numero in ("12345678", "123456789", "987654321", "87654321"):
+        return {"status": "invalido", "digitos": d, "tipo": None, "formatado": texto,
+                "motivo": "número fictício (dígitos repetidos ou sequência)"}
+    if len(numero) == 9 and numero[0] == "9":
+        tipo, fmt = "celular", f"({d[:2]}) {numero[:5]}-{numero[5:]}"
+    elif len(numero) == 8 and numero[0] in "2345":
+        tipo, fmt = "fixo", f"({d[:2]}) {numero[:4]}-{numero[4:]}"
     else:
-        v = valor.strip().lower()
-        if RE_MASCARA.search(v):
-            return {"classe": DESCARTADO, "motivo": "e-mail com caracteres escondidos (mascarado)", "valor_exibicao": v}
-        if "@" not in v:
-            return {"classe": DESCARTADO, "motivo": "e-mail inválido", "valor_exibicao": v}
-        local, dominio_email = v.split("@", 1)
-        exibicao = v
-
-    # --- 2. contabilidade / coworking / recepção
-    base_ctx = ctx + " " + _norm(dominio_email + " " + local)
-    if _tem(TERMOS_CONTABILIDADE, base_ctx):
-        return {"classe": DESCARTADO, "motivo": "pertence a contabilidade/assessoria", "valor_exibicao": "—"}
-    if _tem(TERMOS_COWORKING, base_ctx) or (tipo == "telefone" and _tem(TERMOS_COWORKING, endereco)):
-        return {"classe": DESCARTADO, "motivo": "pertence a coworking/endereço compartilhado", "valor_exibicao": "—"}
-    if _tem(TERMOS_RECEPCAO, ctx) or (tipo == "email" and any(local.startswith(g) for g in EMAIL_GENERICO_RECEPCAO)):
-        return {"classe": DESCARTADO, "motivo": "recepção/central de atendimento", "valor_exibicao": "—"}
-
-    # --- 3. prova de titularidade
-    if "site_proprio" in fontes:
-        return {"classe": CONFIRMADO, "motivo": "consta no site próprio da startup", "valor_exibicao": exibicao}
-    if tipo == "email":
-        toks = tokens(lead.get("proponente", ""))
-        nomes_local = _norm(local.replace(".", " ").replace("_", " ").replace("-", " "))
-        if site and dominio_email == site:
-            return {"classe": CONFIRMADO, "motivo": "e-mail no domínio do site próprio", "valor_exibicao": exibicao}
-        if toks and sum(t in nomes_local for t in toks) >= 2:
-            if RE_INSTITUCIONAL.search(dominio_email):
-                return {"classe": CONFIRMADO, "motivo": "e-mail institucional com o nome do titular (laboratório/universidade)", "valor_exibicao": exibicao}
-            return {"classe": CONFIRMADO, "motivo": "e-mail com o nome completo do titular", "valor_exibicao": exibicao}
-        if dominio_email in DOMINIOS_LIVRES:
-            return {"classe": DUVIDOSO, "motivo": "e-mail pessoal sem relação clara com o titular", "valor_exibicao": exibicao}
-        if RE_INSTITUCIONAL.search(dominio_email):
-            return {"classe": DUVIDOSO, "motivo": "e-mail institucional: confirmar se é do laboratório do proponente", "valor_exibicao": exibicao}
-    return {"classe": DUVIDOSO,
-            "motivo": "só consta no cadastro da Receita/agregadores; titularidade não confirmada",
-            "valor_exibicao": exibicao}
+        return {"status": "incompleto", "digitos": d, "tipo": None, "formatado": texto,
+                "motivo": "formato fora do padrão (celular sem o 9 ou prefixo inválido)"}
+    return {"status": "completo", "digitos": d, "tipo": tipo, "formatado": fmt, "motivo": ""}
 
 
 # ---------------------------------------------------------------
-# Coleta
+# E-mail
 # ---------------------------------------------------------------
-def _contatos_da_receita(lead: dict) -> list[dict]:
-    out = []
-    for campo in ("ddd_telefone_1", "ddd_telefone_2"):
-        v = lead.get(campo)
-        if v:
-            out.append({"tipo": "telefone", "valor": str(v), "contexto": "", "fonte": "receita"})
-    if lead.get("email_receita"):
-        out.append({"tipo": "email", "valor": lead["email_receita"], "contexto": "", "fonte": "receita"})
-    return out
+def analisar_email(bruto: str | None) -> dict:
+    texto = str(bruto or "").strip().lower()
+    if _RE_MASCARA.search(texto):
+        return {"status": "mascarado", "email": texto, "motivo": "caracteres ocultos"}
+    if not _RE_EMAIL.match(texto):
+        return {"status": "invalido", "email": texto, "motivo": "formato inválido"}
+    return {"status": "completo", "email": texto, "motivo": ""}
 
 
-def descobrir_site_proprio(lead: dict, buscar=web.buscar_web, baixar=web.baixar) -> str | None:
-    """Acha o site da startup e confere se o conteúdo cita o nome/projeto."""
-    if lead.get("site") or lead.get("site_proprio"):
-        return lead.get("site") or lead.get("site_proprio")
-    nomes = [lead.get("nome_fantasia"), lead.get("razao_social"), lead.get("titulo_projeto")]
-    nomes = [n for n in nomes if n and not re.fullmatch(r"\d{8}\s.*", n)]  # MEI: "12345678 NOME" não ajuda
-    if not nomes:
+def _letras(texto: str) -> str:
+    return re.sub(r"[^a-z]", "", normalizar_nome(texto).lower())
+
+
+def sinal_de_terceiro(email: str | None) -> tuple[str, str] | None:
+    """('contabilidade'|'coworking', termo) se o e-mail parece de terceiro."""
+    if not email:
         return None
-    distintivos = {t for n in nomes for t in tokens(n) if len(t) >= 5}
-    for r in buscar(f'"{nomes[0]}" {lead.get("municipio", "")} site oficial', max_resultados=6):
-        href = r.get("href", "")
-        dom = web.dominio(href)
-        if not href or any(dom == d or dom.endswith("." + d) for d in web.DOMINIOS_IGNORADOS):
-            continue
-        html, _ = baixar(href)
-        if html and distintivos & set(_norm(BeautifulSoup(html, "html.parser").get_text(" ")).split()):
-            return href
+    alvo = _letras(email)
+    for termo in PALAVRAS_CONTABILIDADE:
+        if termo in alvo:
+            return "contabilidade", termo
+    for termo in PALAVRAS_COWORKING:
+        if termo in alvo:
+            return "coworking", termo
     return None
 
 
-def coletar_contatos(lead: dict, usar_web: bool = True, buscar=web.buscar_web,
-                     baixar=web.baixar) -> dict:
-    """Devolve os campos de contato a acrescentar ao lead."""
-    bruto: list[dict] = _contatos_da_receita(lead)
-    site = None
-
-    if usar_web:
-        site = descobrir_site_proprio(lead, buscar, baixar)
-        if site:
-            lead = {**lead, "site_proprio": site}
-            base = site.rstrip("/")
-            for url in (site, base + "/contato", base + "/contact", base + "/fale-conosco"):
-                html, _ = baixar(url)
-                for c in extrair_contatos_html(html or ""):
-                    bruto.append({**c, "fonte": "site_proprio"})
-        if lead.get("cnpj"):  # agregadores: espelham a Receita (fonte "agregador")
-            c = lead["cnpj"]
-            c_fmt = f"{c[:2]}.{c[2:5]}.{c[5:8]}/{c[8:12]}-{c[12:]}" if len(c) == 14 else c
-            for r in buscar(f'"{c_fmt}" telefone e-mail', max_resultados=5):
-                dom = web.dominio(r.get("href", ""))
-                if dom in ("cnpj.biz", "casadosdados.com.br"):
-                    html, _ = baixar(r["href"])
-                    for c in extrair_contatos_html(html or ""):
-                        bruto.append({**c, "fonte": f"agregador:{dom}"})
-
-    # agrupa por valor
-    grupos: dict[tuple, dict] = {}
-    for c in bruto:
-        a = analisar_telefone(c["valor"]) if c["tipo"] == "telefone" else None
-        chave = (c["tipo"], (a["normalizado"] if a and a["normalizado"] else c["valor"].strip().lower()))
-        g = grupos.setdefault(chave, {"tipo": c["tipo"], "valor": c["valor"], "fontes": [], "contexto": ""})
-        if c["fonte"] not in g["fontes"]:
-            g["fontes"].append(c["fonte"])
-        g["contexto"] += " " + c.get("contexto", "")
-
-    contatos = []
-    for g in grupos.values():
-        r = classificar(g["tipo"], g["valor"], g["fontes"], g["contexto"], lead)
-        contatos.append({"tipo": g["tipo"], "valor": r["valor_exibicao"], "classe": r["classe"],
-                         "motivo": r["motivo"], "fontes": g["fontes"]})
-
-    ordem = {CONFIRMADO: 0, DUVIDOSO: 1, DESCARTADO: 2}
-    contatos.sort(key=lambda c: ordem[c["classe"]])
-    tel = next((c["valor"] for c in contatos if c["tipo"] == "telefone" and c["classe"] == CONFIRMADO), None)
-    mail = next((c["valor"] for c in contatos if c["tipo"] == "email" and c["classe"] == CONFIRMADO), None)
-    if tel or mail:
-        status = "confirmado"
-    elif any(c["classe"] == DUVIDOSO for c in contatos):
-        status = "so_nao_confirmado"
-    elif contatos:
-        status = "so_descartado"
-    else:
-        status = "nenhum"
-    return {"site_proprio": site, "telefone_confirmado": tel, "email_confirmado": mail,
-            "contatos": contatos, "contato_status": status}
+def dominio_proprio(email: str, nomes: list[str | None]) -> bool:
+    """O domínio do e-mail (fora provedores grátis) lembra a startup/empresa?"""
+    label = _letras(email.split("@")[1].split(".")[0])
+    if len(label) < 4 or label in PROVEDORES_GRATIS:
+        return False
+    for n in nomes:
+        alvo = _letras(n or "")
+        if len(alvo) >= 4 and (label in alvo or alvo in label):
+            return True
+    return False
 
 
-def coletar_contatos_leads(leads: list[dict], usar_web: bool = True, max_leads: int | None = None) -> list[dict]:
-    saida, feitos = [], 0
-    for lead in leads:
-        lead = dict(lead)
-        if not lead.get("cnpj"):
-            lead.update({"contatos": [], "contato_status": "sem_cnpj",
-                         "telefone_confirmado": None, "email_confirmado": None})
-        elif max_leads is not None and feitos >= max_leads:
-            lead.update({"contatos": [], "contato_status": "nao_processado",
-                         "telefone_confirmado": None, "email_confirmado": None})
-        else:
-            lead.update(coletar_contatos(lead, usar_web=usar_web))
-            feitos += 1
-        saida.append(lead)
-    return saida
+def email_com_nome_da_pessoa(email: str, proponente: str | None) -> bool:
+    """Parte local do e-mail contém 2+ nomes do proponente (ex.: joao.silva@...)."""
+    local = _letras(email.split("@")[0])
+    toks = [t.lower() for t in _tokens(proponente) if len(t) >= 3]
+    return sum(1 for t in toks if t in local) >= 2
 
 
 # ---------------------------------------------------------------
-# Compatibilidade com o orquestrador de enriquecimento de CNPJ
+# Compartilhamento entre CNPJs (sinal de contador/escritório)
 # ---------------------------------------------------------------
-def _chave_contato_compartilhado(tipo: str, valor: str) -> str | None:
-    if tipo == "telefone":
-        info = analisar_telefone(str(valor or ""))
-        return info["normalizado"] if info["estado"] == "completo" else None
-    valor = str(valor or "").strip().lower()
-    return valor if "@" in valor else None
-
-
 def contatos_compartilhados(registros: list[dict]) -> tuple[set[str], set[str]]:
-    """Identifica telefones/e-mails repetidos em CNPJs distintos.
-
-    Retorna (telefones_compartilhados, emails_compartilhados). A comparação
-    é feita por valor normalizado e conta cada CNPJ apenas uma vez.
-    """
-    donos_tel: dict[str, set[str]] = {}
-    donos_mail: dict[str, set[str]] = {}
-    for registro in registros:
-        cnpj = re.sub(r"\D", "", str(registro.get("cnpj") or ""))
-        if not cnpj:
-            continue
-        for campo in ("ddd_telefone_1", "ddd_telefone_2"):
-            chave = _chave_contato_compartilhado("telefone", registro.get(campo, ""))
-            if chave:
-                donos_tel.setdefault(chave, set()).add(cnpj)
-        chave_mail = _chave_contato_compartilhado("email", registro.get("email") or registro.get("email_receita") or "")
-        if chave_mail:
-            donos_mail.setdefault(chave_mail, set()).add(cnpj)
-    return (
-        {valor for valor, cnpjs in donos_tel.items() if len(cnpjs) > 1},
-        {valor for valor, cnpjs in donos_mail.items() if len(cnpjs) > 1},
-    )
+    """Telefones/e-mails que aparecem em 2+ CNPJs-raiz diferentes."""
+    tel: dict[str, set[str]] = defaultdict(set)
+    mail: dict[str, set[str]] = defaultdict(set)
+    for r in registros:
+        raiz = (r.get("cnpj") or "")[:8]
+        for t in r.get("telefones") or []:
+            d = analisar_telefone(t)["digitos"]
+            if d:
+                tel[d].add(raiz)
+        if r.get("email"):
+            mail[str(r["email"]).strip().lower()].add(raiz)
+    return ({k for k, v in tel.items() if len(v) >= 2},
+            {k for k, v in mail.items() if len(v) >= 2})
 
 
-def avaliar_contato(registro: dict, ident: dict, lead: dict,
-                    tel_comp: set[str], mail_comp: set[str],
-                    vinculo_ok: bool) -> dict:
-    """Adapta os contatos do cadastro aos campos esperados pelo orquestrador.
+# ---------------------------------------------------------------
+# Decisão final
+# ---------------------------------------------------------------
+def _decidir(analise: dict, terceiro, compartilhado: bool, vinculo_ok: bool,
+             corrobora: bool, titular_exato: bool) -> tuple[str, str, str | None]:
+    """Devolve (status, observação, confiança 'alta'|'media'|None)."""
+    if analise["status"] == "mascarado":
+        return "mascarado", "dígitos ocultos: não usar", None
+    if analise["status"] in ("incompleto", "invalido"):
+        return analise["status"], f"número {analise['status']}: {analise.get('motivo', '')}", None
+    if compartilhado:
+        return "compartilhado", "mesmo contato em mais de um CNPJ (provável contabilidade/coworking)", None
+    if terceiro:
+        tipo, termo = terceiro
+        rotulo = "contabilidade" if tipo == "contabilidade" else "coworking/recepção/condomínio"
+        return tipo, f"provável {rotulo} (termo '{termo}' no e-mail do cadastro)", None
+    if not vinculo_ok:
+        return "nao_confirmado", "CNPJ não vinculado com segurança ao proponente/startup", None
+    if corrobora:
+        return "confirmado", "completo; e-mail do domínio/nome da própria startup ou pessoa corrobora", "alta"
+    if titular_exato:
+        return ("confirmado",
+                "completo; cadastro do MEI/empresário individual no nome do proponente "
+                "(pode ter sido preenchido pelo contador: confirme na 1ª ligação)", "media")
+    return ("nao_confirmado",
+            "completo e sem sinais de terceiro, mas não dá para afirmar que é da pessoa/startup "
+            "(vem do cadastro do CNPJ e pode ser do contador)", None)
 
-    Contatos repetidos em CNPJs diferentes são descartados como possivelmente
-    compartilhados. Dados da Receita sem prova independente de titularidade
-    permanecem duvidosos, nunca são promovidos automaticamente a confirmados.
-    """
-    contatos_avaliados = []
-    for item in _contatos_da_receita(registro):
-        tipo, valor = item["tipo"], item["valor"]
-        chave = _chave_contato_compartilhado(tipo, valor)
-        compartilhado = chave is not None and (
-            chave in (tel_comp if tipo == "telefone" else mail_comp)
-        )
-        if compartilhado:
-            contato = {
-                "tipo": tipo,
-                "valor": valor,
-                "classe": DESCARTADO,
-                "motivo": "mesmo contato aparece em mais de um CNPJ; possível contador/central compartilhada",
-                "fontes": ["receita"],
-            }
-        else:
-            resultado = classificar(tipo, valor, ["receita"], "", lead)
-            contato = {
-                "tipo": tipo,
-                "valor": resultado["valor_exibicao"],
-                "classe": resultado["classe"],
-                "motivo": resultado["motivo"],
-                "fontes": ["receita"],
-            }
-        contatos_avaliados.append(contato)
 
-    tel = next((c["valor"] for c in contatos_avaliados
-                if c["tipo"] == "telefone" and c["classe"] == CONFIRMADO), None)
-    email = next((c["valor"] for c in contatos_avaliados
-                  if c["tipo"] == "email" and c["classe"] == CONFIRMADO), None)
-    if tel or email:
-        status = "confirmado"
-    elif any(c["classe"] == DUVIDOSO for c in contatos_avaliados):
-        status = "so_nao_confirmado"
-    elif contatos_avaliados:
-        status = "so_descartado"
+def avaliar_contato(registro: dict, identidade: dict, lead: dict,
+                    tel_compartilhados: set[str], email_compartilhados: set[str],
+                    vinculo_ok: bool = True) -> dict:
+    """Aplica a regra de contato a um CNPJ já vinculado ao lead."""
+    email_raw = registro.get("email")
+    em = analisar_email(email_raw) if email_raw else None
+    terceiro = sinal_de_terceiro(em["email"]) if em and em["status"] == "completo" else None
+
+    nomes = [nome_da_startup(lead.get("titulo_projeto")), registro.get("nome_fantasia"),
+             registro.get("razao_social")]
+    corrobora = bool(em and em["status"] == "completo" and (
+        dominio_proprio(em["email"], nomes) or email_com_nome_da_pessoa(em["email"], lead.get("proponente"))))
+    titular_exato = bool(identidade.get("pessoa") == "exato" and registro.get("titular_unico"))
+
+    # ----- telefone -----
+    opcoes = []
+    for bruto in registro.get("telefones") or []:
+        a = analisar_telefone(bruto)
+        status, obs, conf = _decidir(
+            a, terceiro, a["digitos"] in tel_compartilhados, vinculo_ok, corrobora, titular_exato)
+        opcoes.append((_PRIORIDADE[status], status, obs, conf, a))
+    if opcoes:
+        _, status, obs, conf, a = min(opcoes, key=lambda o: o[0])
+        telefone = {
+            "telefone": a["formatado"] if status == "confirmado" else None,
+            "telefone_tipo": a["tipo"] if status == "confirmado" else None,
+            "telefone_confianca": conf,
+            "telefone_status": status,
+            "telefone_obs": obs,
+            "telefone_candidato": None if status == "confirmado" else (a["formatado"] or None),
+        }
     else:
-        status = "nenhum"
+        telefone = {"telefone": None, "telefone_tipo": None, "telefone_confianca": None,
+                    "telefone_status": "sem_dado", "telefone_obs": "cadastro do CNPJ sem telefone",
+                    "telefone_candidato": None}
 
-    return {
-        "telefone": tel,
-        "email": email,
-        "telefone_status": next((c["classe"] for c in contatos_avaliados if c["tipo"] == "telefone"), "nenhum"),
-        "email_status": next((c["classe"] for c in contatos_avaliados if c["tipo"] == "email"), "nenhum"),
-        "contatos": contatos_avaliados,
-        "contato_status": status,
-    }
+    # ----- e-mail -----
+    if em:
+        if em["status"] != "completo":
+            st, ob, cf = em["status"], f"e-mail {em['status']}: {em['motivo']}", None
+        else:
+            st, ob, cf = _decidir(
+                {"status": "completo"}, terceiro, em["email"] in email_compartilhados,
+                vinculo_ok, corrobora, titular_exato)
+            ob = ob.replace("número", "e-mail")
+        email = {
+            "email": em["email"] if st == "confirmado" else None,
+            "email_confianca": cf, "email_status": st, "email_obs": ob,
+            "email_candidato": None if st == "confirmado" else em["email"],
+        }
+    else:
+        email = {"email": None, "email_confianca": None, "email_status": "sem_dado",
+                 "email_obs": "cadastro do CNPJ sem e-mail", "email_candidato": None}
+    return {**telefone, **email}

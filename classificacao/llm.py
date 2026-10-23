@@ -1,38 +1,38 @@
 """
-ETAPA 3: CLASSIFICAÇÃO (Pré-SDR com LLM)
+ETAPA 3: CLASSIFICAÇÃO (Pré-SDR com LLM) usando Gemini (SDK google-genai)
 =====================================================================
-Para cada lead, a OpenAI devolve um JSON estruturado com nota de fit
+Para cada lead, o modelo devolve um JSON estruturado com nota de fit
 (0-10), confiança, justificativa, serviços sugeridos e evidências. As
 travas anti-alucinação ficam em guardrails.py.
 
-Configuração (arquivo .env na RAIZ, nunca vai para o git):
-    OPENAI_API_KEY=sk-...
-    OPENAI_MODEL=nome-do-modelo   # use um modelo que sua conta tenha e
-                                  # que suporte Structured Outputs
+Utiliza o SDK oficial google-genai, compatível com os novos formatos de chave AQ.
+Configuração no arquivo .env:
+    GEMINI_API_KEY=AQ...
+    GEMINI_MODEL=gemini-3.8-flash (opcional)
 
-Teste rápido, a partir da RAIZ do projeto (gasta só 3 chamadas):
-    python pipeline.py --pagina "https://programacentelha.com.br/df/" --max-ia 3
-
-Depois o painel roda com:
-    streamlit run app.py     # http://localhost:8501
+DIAGNÓSTICO:
+    python -m classificacao.llm --testar
 =====================================================================
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import logging
 import os
+import sys
 import time
 from pathlib import Path
 
-import openai
+from google import genai
+from google.genai import types
 
 try:
     from dotenv import load_dotenv
     load_dotenv()
-except ImportError:  # python-dotenv é opcional; dá para exportar a variável
+except ImportError:
     pass
 
 from classificacao.guardrails import SCHEMA, validar_resposta, resultado_falha
@@ -42,10 +42,12 @@ log = logging.getLogger("classificacao")
 
 RAIZ = Path(__file__).resolve().parent.parent
 CACHE_PATH = RAIZ / "data" / "cache_classificacao.json"
-MODELO_PADRAO = "gpt-4o-mini"  # troque via OPENAI_MODEL se não estiver disponível
 
-# Só estes campos vão para a OpenAI. O NOME DO PROPONENTE (pessoa física)
-# NÃO é enviado: o fit depende do projeto, não da pessoa (minimização de dados).
+# Configurações padrão do Gemini
+MODELO_PADRAO = "gemini-3.8-flash"
+PAUSA_PADRAO = 6.0
+
+# Só estes campos vão para o LLM. O NOME DO PROPONENTE não é enviado.
 CAMPOS_ENVIADOS = (
     "titulo_projeto", "tematica", "municipio",
     "cnae_descricao", "porte", "situacao_cadastral", "data_abertura",
@@ -77,11 +79,11 @@ REGRAS ANTI-ALUCINAÇÃO:
 ESCALA: 9-10 necessidade evidente e alinhada aos serviços; 7-8 forte indício;
 4-6 possível, mas incerto; 1-3 pouco provável; 0 sem relação."""
 
-VERSAO_PROMPT = "v1"
+VERSAO_PROMPT = "v3"
 
 
 class ErroFatalIA(Exception):
-    """Erro que não adianta repetir (chave inválida, modelo inexistente...)."""
+    """Erro que não adianta repetir (chave inválida, modelo inexistente, cota diária...)."""
 
 
 class RecusaDoModelo(Exception):
@@ -89,31 +91,45 @@ class RecusaDoModelo(Exception):
 
 
 # ---------------------------------------------------------------
+# Configuração
+# ---------------------------------------------------------------
+def _chave_api() -> str | None:
+    return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+
+def _modelo() -> str:
+    return os.getenv("GEMINI_MODEL") or MODELO_PADRAO
+
+def _pausa() -> float:
+    try:
+        return float(os.getenv("LLM_PAUSA") or PAUSA_PADRAO)
+    except ValueError:
+        return PAUSA_PADRAO
+
+def criar_cliente():
+    return genai.Client(api_key=_chave_api())
+
+# ---------------------------------------------------------------
 # Entrada
 # ---------------------------------------------------------------
 def montar_payload(lead: dict) -> dict:
     return {c: lead[c] for c in CAMPOS_ENVIADOS if lead.get(c)}
 
-
 def _texto_entrada(payload: dict) -> str:
     return " | ".join(str(v) for v in payload.values())
 
-
 # ---------------------------------------------------------------
-# Cache (poupa custo e garante demo estável, mesmo sem internet)
+# Cache
 # ---------------------------------------------------------------
 def _chave_cache(payload: dict, modelo: str) -> str:
     bruto = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     base = f"{VERSAO_PROMPT}|{modelo}|{PROMPT_SISTEMA}|{bruto}"
     return hashlib.sha256(base.encode("utf-8")).hexdigest()
 
-
 def _carregar_cache() -> dict:
     try:
         return json.loads(CACHE_PATH.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
-
 
 def _salvar_cache(cache: dict) -> None:
     try:
@@ -122,29 +138,25 @@ def _salvar_cache(cache: dict) -> None:
     except OSError as e:
         log.warning("Não consegui salvar o cache: %s", e)
 
-
 # ---------------------------------------------------------------
 # Chamada ao modelo
 # ---------------------------------------------------------------
 def _chamar_modelo(client, modelo: str, mensagens: list[dict]) -> str:
-    resp = client.chat.completions.create(
+    # Combina o conteúdo de system e user para o Gemini
+    conteudo = "\n\n".join(m["content"] for m in mensagens)
+    
+    resp = client.models.generate_content(
         model=modelo,
-        messages=mensagens,
-        response_format={
-            "type": "json_schema",
-            "json_schema": {"name": "avaliacao_lead", "strict": True, "schema": SCHEMA},
-        },
+        contents=conteudo,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=SCHEMA,
+        ),
     )
-    msg = resp.choices[0].message
-    if getattr(msg, "refusal", None):
-        raise RecusaDoModelo(msg.refusal)
-    return msg.content or ""
+    return resp.text or ""
 
 
 def classificar_lead(lead: dict, client, modelo: str, tentativas: int = 3) -> dict:
-    """Classifica um lead. Nunca levanta exceção de rede/validação: devolve
-    sempre um dict com `status_ia` ('ok', 'revisar' ou 'falha').
-    Só levanta ErroFatalIA (não adianta insistir)."""
     payload = montar_payload(lead)
     entrada = _texto_entrada(payload)
     mensagens = [
@@ -157,27 +169,16 @@ def classificar_lead(lead: dict, client, modelo: str, tentativas: int = 3) -> di
         try:
             bruto = _chamar_modelo(client, modelo, mensagens)
             dados = json.loads(bruto)
-        except RecusaDoModelo as e:
-            return resultado_falha(f"modelo recusou: {str(e)[:120]}")
         except json.JSONDecodeError:
             motivo = "JSON inválido"
             mensagens.append({"role": "user", "content": "Responda apenas com o JSON no schema."})
             continue
-        except openai.RateLimitError:
-            motivo = "limite de requisições"
-            time.sleep(2 ** n)
-            continue
-        except openai.APIConnectionError:  # inclui timeout
-            motivo = "falha de rede com a OpenAI"
-            time.sleep(1.5 * n)
-            continue
-        except openai.APIStatusError as e:
-            if e.status_code in (400, 401, 403, 404):
-                raise ErroFatalIA(
-                    f"HTTP {e.status_code}: {e.message}. Verifique OPENAI_API_KEY e OPENAI_MODEL."
-                ) from e
-            motivo = f"erro HTTP {e.status_code} da OpenAI"
-            time.sleep(1.5 * n)
+        except Exception as e:
+            err_str = str(e)
+            if "400" in err_str or "401" in err_str or "403" in err_str or "404" in err_str:
+                raise ErroFatalIA(f"Erro de autenticação/modelo: {err_str[:200]}") from e
+            motivo = f"Erro de chamada: {err_str[:100]}"
+            time.sleep(2 * n)
             continue
 
         resultado, problemas = validar_resposta(dados, entrada)
@@ -193,17 +194,14 @@ def classificar_lead(lead: dict, client, modelo: str, tentativas: int = 3) -> di
 
     return resultado_falha(motivo)
 
-
 # ---------------------------------------------------------------
 # Lote (chamado pelo pipeline.py)
 # ---------------------------------------------------------------
 def classificar_leads(leads: list[dict], modelo: str | None = None,
                       max_chamadas: int | None = None, usar_cache: bool = True,
-                      client=None) -> list[dict]:
-    """Adiciona nota_fit, faixa_fit, confianca, justificativa, servicos_sugeridos,
-    evidencias, status_ia e avisos_ia a cada lead.
-    max_chamadas limita as chamadas à OpenAI (cache não conta) para testar barato."""
-    modelo = modelo or os.getenv("OPENAI_MODEL") or MODELO_PADRAO
+                      client=None, pausa: float | None = None) -> list[dict]:
+    modelo = modelo or _modelo()
+    pausa = _pausa() if pausa is None else pausa
     cache = _carregar_cache() if usar_cache else {}
     chamadas = 0
     fatal: str | None = None
@@ -222,18 +220,20 @@ def classificar_leads(leads: list[dict], modelo: str | None = None,
             resultado = resultado_falha("limite de chamadas atingido (--max-ia)", "nao_processado")
         else:
             if client is None:
-                if not os.getenv("OPENAI_API_KEY"):
-                    fatal = "OPENAI_API_KEY não definida (crie o arquivo .env)"
+                if not _chave_api():
+                    fatal = "Chave da IA não definida no .env (GEMINI_API_KEY)"
                     log.error(fatal)
                     saida.append({**lead, **resultado_falha(fatal, "sem_chave"), "modelo_ia": modelo})
                     continue
-                client = openai.OpenAI(timeout=30)
+                client = criar_cliente()
             try:
                 resultado = classificar_lead(lead, client, modelo)
                 chamadas += 1
+                if pausa:
+                    time.sleep(pausa)
             except ErroFatalIA as e:
                 fatal = str(e)
-                log.error("Erro fatal na OpenAI: %s", fatal)
+                log.error("Erro fatal no LLM: %s", fatal)
                 resultado = resultado_falha(fatal)
             if resultado["status_ia"] in ("ok", "revisar"):
                 cache[chave] = resultado
@@ -245,5 +245,49 @@ def classificar_leads(leads: list[dict], modelo: str | None = None,
     contagem: dict[str, int] = {}
     for l in saida:
         contagem[l["status_ia"]] = contagem.get(l["status_ia"], 0) + 1
-    log.info("Classificação: %s (%d chamadas à OpenAI, modelo %s)", contagem, chamadas, modelo)
+    log.info("Classificação: %s (%d chamadas à IA, modelo %s)", contagem, chamadas, modelo)
     return saida
+
+
+# ---------------------------------------------------------------
+# Diagnóstico
+# ---------------------------------------------------------------
+def diagnosticar(listar_modelos: bool) -> int:
+    if not _chave_api():
+        print("✗ GEMINI_API_KEY não encontrada no .env")
+        return 1
+    client = criar_cliente()
+    print(f"Modelo: {_modelo()}")
+    try:
+        if listar_modelos:
+            # O SDK google-genai ainda não tem um listador nativo simples, então omitimos
+            print("Listagem de modelos não suportada nesta versão.")
+            return 0
+        
+        exemplo = {"titulo_projeto": "Plataforma de IA para triagem de processos jurídicos",
+                   "tematica": "Inteligência Artificial e Machine Learning", "municipio": "Brasília"}
+        resultado = classificar_lead(exemplo, client, _modelo())
+    except ErroFatalIA as e:
+        print(f"✗ {e}")
+        return 1
+    except Exception as e:
+        print(f"✗ Erro de conexão: {e}")
+        return 1
+    print("\nResultado do teste:\n" + json.dumps(resultado, ensure_ascii=False, indent=2))
+    if resultado["status_ia"] in ("ok", "revisar"):
+        print("\n✓ A IA está funcionando.")
+        return 0
+    print("\n✗ A IA respondeu, mas a resposta foi reprovada ou falhou.")
+    return 1
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--testar", action="store_true")
+    ap.add_argument("--modelos", action="store_true")
+    a = ap.parse_args()
+    if not (a.testar or a.modelos):
+        ap.print_help()
+        sys.exit(0)
+    sys.exit(diagnosticar(listar_modelos=a.modelos))

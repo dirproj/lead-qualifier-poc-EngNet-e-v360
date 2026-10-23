@@ -11,7 +11,8 @@ homônimos. Aqui cada candidato é CONFERIDO contra o cadastro oficial:
   Além disso, a empresa precisa estar ATIVA e na UF do edital.
 
   alta  = pessoa exata + startup      -> atribui o CNPJ
-  media = pessoa exata (ou parcial + startup) -> atribui o CNPJ
+  media = pessoa exata (ou parcial + startup), ou nome da startup + empresa
+          aberta a partir de 2025 (compatível com o edital) -> atribui o CNPJ
   baixa = só o nome da startup        -> NÃO atribui; fica como candidato
 =====================================================================
 """
@@ -28,6 +29,9 @@ GENERICOS = {
     "LABS", "GROUP", "GRUPO", "BRASIL", "PLATAFORMA", "APP",
 }
 RANK = {"alta": 3, "media": 2, "baixa": 1, None: 0}
+# Empresas de edital (ex.: Centelha DF 2025/26) costumam ser abertas depois da aprovação.
+# O nome da startup + abertura a partir desta data já é um vínculo razoável (ex.: "X INOVA SIMPLES").
+ABERTURA_RECENTE_A_PARTIR_DE = "2025-01-01"
 
 
 def normalizar_nome(texto: str | None) -> str:
@@ -40,31 +44,59 @@ def normalizar_nome(texto: str | None) -> str:
 def _tokens(texto: str | None) -> list[str]:
     return [t for t in normalizar_nome(texto).split() if t not in STOPWORDS]
 
-
 def comparar_pessoa(nome_a: str | None, nome_b: str | None) -> str | None:
     """'exato' (mesmos tokens, qualquer ordem), 'parcial' (todos os tokens do
-    menor nome, com 3+ tokens, estão no maior) ou None."""
+    menor nome estão no maior) ou None."""
     a, b = set(_tokens(nome_a)), set(_tokens(nome_b))
     if not a or not b:
         return None
+    
+    # Se o nome for idêntico após remover acentos e pontuação
     if a == b and len(a) >= 2:
         return "exato"
+    
+    # Se o conjunto menor estiver contido no maior (ignorando ordem)
     menor, maior = (a, b) if len(a) <= len(b) else (b, a)
-    if len(menor) >= 3 and menor <= maior:
+    if len(menor) >= 2 and menor.issubset(maior):
         return "parcial"
+        
     return None
 
-
 def nome_da_startup(titulo: str | None) -> str | None:
-    """'GoalSet: Rastreabilidade...' -> 'GoalSet'. Títulos longos e genéricos
-    (frases descritivas) não são nome de startup e devolvem None."""
+    """Extrai o nome da startup do título do projeto.
+    
+    Exemplos:
+    - "GoalSet: Rastreabilidade e Monetização de Serviços Ambientais" -> "GoalSet"
+    - "Sintática AI Studio" -> "Sintática AI Studio"
+    - "Taiuva Vitae" -> "Taiuva Vitae"
+    - "ECOBUEIROS SUSTENTÁVEIS NO DF" -> "ECOBUEIROS"
+    """
     if not titulo:
         return None
-    nome = re.split(r"\s[:\-–|]\s|:\s", titulo, maxsplit=1)[0].strip()
-    toks = _tokens(nome)
-    if not toks or len(toks) > 4 or all(t in GENERICOS for t in toks):
+    
+    titulo_limpo = normalizar_nome(titulo)
+    
+    # 1. Tenta separar por ':' ou '-' (o que vier primeiro)
+    #    Ex: "GOALSET: RASTREABILIDADE..." -> "GOALSET"
+    for sep in [":", " - ", " – ", " | "]:
+        if sep in titulo_limpo:
+            nome = titulo_limpo.split(sep)[0].strip()
+            toks = _tokens(nome)
+            if toks:
+                return " ".join(toks)  # Retorna o nome antes do separador
+            break
+    
+    # 2. Se não tem separador, pega as primeiras palavras significativas
+    toks = _tokens(titulo_limpo)
+    if not toks:
         return None
-    return nome
+    
+    # Se a primeira palavra for genérica, pega as duas primeiras
+    if toks[0] in GENERICOS and len(toks) > 1:
+        return " ".join(toks[:2])
+    
+    # Caso padrão: retorna apenas a primeira palavra (nome da startup)
+    return toks[0]
 
 
 def _contem_startup(nome_startup: str | None, *campos: str | None) -> bool:
@@ -113,6 +145,9 @@ def avaliar(lead: dict, registro: dict, uf_alvo: str = "DF") -> dict:
         conf = "alta"
     elif pessoa == "exato" or (pessoa == "parcial" and startup):
         conf = "media"
+    elif startup and (registro.get("data_abertura") or "") >= ABERTURA_RECENTE_A_PARTIR_DE:
+        conf = "media"
+        motivos.append(f"empresa aberta em {registro.get('data_abertura')} (compatível com o edital)")
     elif startup:
         conf = "baixa"
     else:

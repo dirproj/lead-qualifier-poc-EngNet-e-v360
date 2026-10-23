@@ -151,7 +151,7 @@ class ExecucaoPipeline:
     Existe UMA instância por servidor (ver `execucao_pipeline`), então:
     - recarregar a página não perde o andamento;
     - dois cliques (ou duas abas) nunca disparam duas coletas ao mesmo tempo,
-      o que evitaria gasto duplicado de créditos da OpenAI.
+      o que evitaria gasto duplicado de créditos da IA.
     """
 
     MAX_LINHAS = 500
@@ -225,14 +225,14 @@ def execucao_pipeline() -> ExecucaoPipeline:
     return ExecucaoPipeline()
 
 
-def chave_openai_configurada() -> bool:
-    """True se OPENAI_API_KEY existe no ambiente ou no .env (nunca exibe o valor)."""
-    if os.environ.get("OPENAI_API_KEY"):
+def chave_gemini_configurada() -> bool:
+    """True se GEMINI_API_KEY existe no ambiente ou no .env (nunca exibe o valor)."""
+    if os.environ.get("GEMINI_API_KEY"):
         return True
     try:
         for linha in (RAIZ / ".env").read_text(encoding="utf-8").splitlines():
             nome, _, valor = linha.partition("=")
-            if nome.strip().removeprefix("export ").strip() == "OPENAI_API_KEY" and valor.strip().strip("'\""):
+            if nome.strip().removeprefix("export ").strip() == "GEMINI_API_KEY" and valor.strip().strip("'\""):
                 return True
     except OSError:
         pass
@@ -312,11 +312,11 @@ def painel_coleta() -> None:
             ))
         else:
             liberado = st.checkbox(
-                "Entendo que a rodada completa usa créditos da API da OpenAI", key="coleta_confirma",
+                "Entendo que a rodada completa usa créditos da API do Gemini", key="coleta_confirma",
             )
 
-        if not chave_openai_configurada():
-            st.warning("Não encontrei OPENAI_API_KEY no `.env`: a busca roda, mas os leads ficam "
+        if not chave_gemini_configurada():
+            st.warning("Não encontrei GEMINI_API_KEY no `.env`: a busca roda, mas os leads ficam "
                        "sem classificação da IA (status “sem chave”).")
 
         if st.button("▶ Buscar leads", type="primary", disabled=not liberado, key="btn_buscar_leads"):
@@ -463,7 +463,6 @@ def montar_tabela(leads: list[dict], crm: dict, mostrar_proponente: bool) -> pd.
             "Município": l.get("municipio"),
             "Serviços sugeridos": nomes_servicos(l.get("servicos_sugeridos")),
             "IA": ROTULO_STATUS_IA.get(l.get("status_ia"), "—"),
-            "CNPJ": ROTULO_ENRIQ.get(l.get("status_enriquecimento"), "—"),
             "CNPJ nº": formatar_cnpj(l.get("cnpj")) if l.get("cnpj") else "—",
             "Telefone": l.get("telefone") or "—",
             "E-mail": l.get("email") or "—",
