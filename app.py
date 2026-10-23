@@ -489,6 +489,7 @@ def exportar_csv(leads: list[dict], crm: dict, mostrar_proponente: bool) -> byte
             "justificativa": l.get("justificativa"), "status_ia": l.get("status_ia"),
             "cnpj": l.get("cnpj"), "razao_social": l.get("razao_social"),
             "cnpj_origem": l.get("cnpj_origem"), "cnpj_confianca": l.get("cnpj_confianca"),
+            "cnpj_alerta": l.get("cnpj_alerta"),
             "cnae": l.get("cnae_descricao"), "porte": l.get("porte"),
             "telefone": l.get("telefone"), "telefone_status": l.get("telefone_status"),
             "telefone_obs": l.get("telefone_obs"),
@@ -548,6 +549,8 @@ def painel_detalhe(lead: dict, crm: dict, mostrar_proponente: bool) -> None:
             origem = {"automatico": "busca automática", "manual": "informado pela equipe"}.get(lead.get("cnpj_origem"), "—")
             st.caption(f"Como foi encontrado: {origem} · confiança {lead.get('cnpj_confianca') or '—'}. "
                        f"{lead.get('cnpj_evidencia') or ''}")
+            if lead.get("cnpj_alerta"):
+                st.warning(f"Vínculo fraco: {lead['cnpj_alerta']}")
         else:
             st.info(f"CNPJ não vinculado ({ROTULO_ENRIQ.get(lead.get('status_enriquecimento'), '—')}). "
                     f"{lead.get('cnpj_evidencia') or ''}")

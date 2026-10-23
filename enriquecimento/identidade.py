@@ -29,6 +29,7 @@ GENERICOS = {
     "LABS", "GROUP", "GRUPO", "BRASIL", "PLATAFORMA", "APP",
 }
 RANK = {"alta": 3, "media": 2, "baixa": 1, None: 0}
+MIN_NOMES_PARA_BATE_PARCIAL_SEGURO = 3
 # Empresas de edital (ex.: Centelha DF 2025/26) costumam ser abertas depois da aprovação.
 # O nome da startup + abertura a partir desta data já é um vínculo razoável (ex.: "X INOVA SIMPLES").
 ABERTURA_RECENTE_A_PARTIR_DE = "2025-01-01"
@@ -113,10 +114,12 @@ def avaliar(lead: dict, registro: dict, uf_alvo: str = "DF") -> dict:
     motivos: list[str] = []
 
     melhor = None
+    nomes_em_comum = 0
     for socio in registro.get("socios") or []:
         r = comparar_pessoa(proponente, socio)
         if r == "exato" or (r == "parcial" and melhor is None):
             melhor = r
+            nomes_em_comum = len(set(_tokens(proponente)) & set(_tokens(socio)))
     pessoa = melhor
     if pessoa:
         motivos.append(f"nome do proponente bate ({pessoa}) com sócio do QSA")
@@ -153,4 +156,15 @@ def avaliar(lead: dict, registro: dict, uf_alvo: str = "DF") -> dict:
     else:
         return {"confianca": None, "pessoa": pessoa, "startup": startup, "motivos": motivos,
                 "rejeicao": "sem vínculo com o proponente nem com o nome da startup"}
-    return {"confianca": conf, "pessoa": pessoa, "startup": startup, "motivos": motivos, "rejeicao": None}
+    return {"confianca": conf, "pessoa": pessoa, "startup": startup, "motivos": motivos, "rejeicao": None,
+            "alerta": _alerta_de_vinculo_fraco(pessoa, nomes_em_comum)}
+
+
+def _alerta_de_vinculo_fraco(pessoa: str | None, nomes_em_comum: int) -> str | None:
+    if pessoa == "parcial" and nomes_em_comum < MIN_NOMES_PARA_BATE_PARCIAL_SEGURO:
+        return (f"o sócio só bate em {nomes_em_comum} nomes com o proponente; "
+                "pode ser homônimo, confirme antes de contatar")
+    if pessoa is None:
+        return ("vínculo só pelo nome da startup e pela data de abertura, sem o proponente no "
+                "quadro societário; confirme antes de contatar")
+    return None

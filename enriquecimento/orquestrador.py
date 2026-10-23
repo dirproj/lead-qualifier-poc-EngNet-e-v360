@@ -198,7 +198,7 @@ def _resolver(lead: dict, mapa: dict, buscador, consulta, cache: Cache, uf_alvo:
                      "cnpj_candidatos": [_resumo(c, r, i) for c, r, i in aceitos[:3]]}, None, None)
         c, registro, ident = topo
         return ({"cnpj": c, "cnpj_origem": "automatico", "cnpj_confianca": ident["confianca"],
-                 "cnpj_evidencia": "; ".join(ident["motivos"]),
+                 "cnpj_evidencia": "; ".join(ident["motivos"]), "cnpj_alerta": ident.get("alerta"),
                  "status_enriquecimento": OK}, registro, ident)
 
     fracos = [a for a in avaliados if a[2]["confianca"] == "baixa"]
@@ -307,7 +307,7 @@ def enriquecer_leads(leads: list[dict], mapa_cnpj: dict[str, str] | None = None,
 CSV_ENCONTRADOS = RAIZ / "data" / "cnpjs_encontrados.csv"
 _COLUNAS_RELATORIO = (
     "proponente", "titulo_projeto", "status_enriquecimento", "cnpj", "razao_social",
-    "cnpj_origem", "cnpj_confianca", "cnpj_evidencia", "telefone", "telefone_status",
+    "cnpj_origem", "cnpj_confianca", "cnpj_evidencia", "cnpj_alerta", "telefone", "telefone_status",
     "telefone_obs", "email", "email_status", "email_obs",
 )
 
