@@ -261,9 +261,6 @@ class Buscador:
         else:
             flags, ordem = {"razao_social": True, "nome_fantasia": True, "nome_socio": False}, ("radical",)
         
-        chave_api = os.getenv("CASADOSDADOS_API_KEY", "").strip()
-        print(f"DEBUG API: chave={'SIM' if chave_api else 'NAO'}, termo='{nome}', tipo='{tipo}'")
-        
         cabecalhos = {"User-Agent": USER_AGENT, "Accept": "application/json", "api-key": os.getenv("CASADOSDADOS_API_KEY", "")}
         
         for tipo_busca in ordem:
@@ -277,10 +274,8 @@ class Buscador:
             self._esperar(host)
             try:
                 r = requests.post(url, json=payload, headers=cabecalhos, timeout=20)
-                print(f"DEBUG API: status={r.status_code}, resposta={r.text[:200]}")
             except requests.RequestException as e:
                 diag.append(f"{f['nome']}: falhou ({type(e).__name__})")
-                print(f"DEBUG API: exceção={e}")
                 return []
             if bloqueado(r.status_code, r.text):
                 diag.append(f"{f['nome']}: bloqueado/anti-bot (HTTP {r.status_code}); não tento contornar")

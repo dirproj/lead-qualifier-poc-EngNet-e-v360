@@ -126,8 +126,6 @@ def _resumo(cnpj: str, registro: dict, ident: dict) -> dict:
 def _resolver(lead: dict, mapa: dict, buscador, consulta, cache: Cache, uf_alvo: str):
     """Devolve (campos_para_o_lead, registro|None, identidade|None)."""
     proponente = lead.get("proponente", "")
-    titulo = lead.get("titulo_projeto", "")
-    print(f"DEBUG RESOLVER: proponente='{proponente}', titulo='{titulo}")
     cnpj = lead.get("cnpj") or mapa.get(_chave(proponente))
 
     # ---- caminho 1: CNPJ informado pela equipe ----
@@ -313,14 +311,12 @@ def diagnosticar(proponente: str, titulo: str, uf: str) -> None:
                 print(f"  - {d}")
             candidatos += [c for c in achados if c not in candidatos]
         print(f"\n{len(candidatos)} candidatos distintos. Conferindo os {min(len(candidatos), MAX_VERIFICAR)} primeiros no cadastro oficial:\n")
-        avaliados = []
         for c in candidatos[:MAX_VERIFICAR]:
-            registro, _ = _registro(c, consulta, cache)
-            print(f"DEBUG REGISTRO: CNPJ={c}, registro={'SIM' if registro else 'NAO'}, status={_}")
-            if registro:
-                ident = identidade.avaliar(lead, registro, uf_alvo)
-                print(f"DEBUG IDENTIDADE: CNPJ={c}, razao={registro.get('razao_social')}, confianca={ident['confianca']}, motivos={ident['motivos']}, rejeicao={ident.get('rejeicao')}")
-                avaliados.append((c, registro, ident))
+            registro, status = _registro(c, brasilapi.consultar_cnpj, cache)
+            if not registro:
+                print(f"  {c}  [cadastro indisponível: {status}]")
+                continue
+            ident = identidade.avaliar(lead, registro, uf)
             veredito = ident["confianca"] or "REJEITADO"
             print(f"  {c}  {registro.get('razao_social')}  [{veredito}]")
             print(f"      {'; '.join(ident['motivos']) or '-'}  {('| ' + ident['rejeicao']) if ident['rejeicao'] else ''}")
