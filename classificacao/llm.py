@@ -205,6 +205,7 @@ def classificar_leads(leads: list[dict], modelo: str | None = None,
     cache = _carregar_cache() if usar_cache else {}
     chamadas = 0
     fatal: str | None = None
+    status_fatal = "falha"
     saida: list[dict] = []
 
     for lead in leads:
@@ -215,13 +216,14 @@ def classificar_leads(leads: list[dict], modelo: str | None = None,
         if chave in cache:
             resultado = cache[chave]
         elif fatal:
-            resultado = resultado_falha(fatal)
+            resultado = resultado_falha(fatal, status_fatal)
         elif max_chamadas is not None and chamadas >= max_chamadas:
             resultado = resultado_falha("limite de chamadas atingido (--max-ia)", "nao_processado")
         else:
             if client is None:
                 if not _chave_api():
                     fatal = "Chave da IA não definida no .env (GEMINI_API_KEY)"
+                    status_fatal = "sem_chave"
                     log.error(fatal)
                     saida.append({**lead, **resultado_falha(fatal, "sem_chave"), "modelo_ia": modelo})
                     continue

@@ -67,10 +67,10 @@ class TestIA(unittest.TestCase):
         chave_original = llm._chave_api
         llm._chave_api = lambda: None
         try:
-            out = llm.classificar_leads([dict(LEAD)], usar_cache=False, pausa=0)
+            out = llm.classificar_leads([dict(LEAD), dict(LEAD, titulo_projeto="Outro")], usar_cache=False, pausa=0)
         finally:
             llm._chave_api = chave_original
-        self.assertEqual(out[0]["status_ia"], "sem_chave")
+        self.assertEqual([l["status_ia"] for l in out], ["sem_chave", "sem_chave"])
         self.assertIn("GEMINI_API_KEY", out[0]["avisos_ia"][0])
 
     def test_nome_do_proponente_nao_vai_para_a_ia(self):
