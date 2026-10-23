@@ -11,16 +11,18 @@ O sistema lê a lista real de projetos aprovados num edital de inovação (ex.: 
 ## Sumário
 
 1. [Como funciona](#como-funciona)
-2. [Estrutura do projeto](#estrutura-do-projeto)
-3. [Instalação](#instalação)
-4. [Configuração](#configuração)
-5. [Como rodar](#como-rodar)
-6. [Diagnóstico: quando algo falha](#diagnóstico-quando-algo-falha)
-7. [Regra de contato](#regra-de-contato)
-8. [Guardrails contra alucinação](#guardrails-contra-alucinação)
-9. [Privacidade, LGPD e termos de uso](#privacidade-lgpd-e-termos-de-uso)
-10. [Limitações conhecidas](#limitações-conhecidas)
-11. [Roteiro da demonstração](#roteiro-da-demonstração)
+2. [Resultado de uma rodada real](#resultado-de-uma-rodada-real)
+3. [Estrutura do projeto](#estrutura-do-projeto)
+4. [Instalação](#instalação)
+5. [Configuração](#configuração)
+6. [Como rodar](#como-rodar)
+7. [Diagnóstico: quando algo falha](#diagnóstico-quando-algo-falha)
+8. [Regra de contato](#regra-de-contato)
+9. [Guardrails contra alucinação](#guardrails-contra-alucinação)
+10. [Privacidade, LGPD e termos de uso](#privacidade-lgpd-e-termos-de-uso)
+11. [Limitações conhecidas](#limitações-conhecidas)
+12. [Próximos passos](#próximos-passos)
+13. [Roteiro da demonstração](#roteiro-da-demonstração)
 
 ---
 
@@ -46,6 +48,25 @@ flowchart LR
 | 4 | **Painel** | Tabela interativa, filtros, detalhe do lead (com a origem do CNPJ e o status de cada contato) e funil comercial. |
 
 **Por que conferir cada candidato?** A busca por nome pode devolver homônimos. Os sites só *geram candidatos*; quem decide é o cadastro oficial (quadro societário, razão social de MEI, UF e situação). Se houver dois candidatos igualmente prováveis, o lead fica **ambíguo** e nenhum CNPJ é atribuído.
+
+---
+
+## Resultado de uma rodada real
+
+Rodada de 23/10/2026 sobre a página do Centelha DF, que publicou a lista de projetos contratados em 21/09/2026.
+
+| Etapa | Resultado |
+|-------|-----------|
+| Extração | **46 projetos** lidos do PDF de contratados |
+| CNPJ vinculado | **23 (50%)**: 20 com confiança alta, 3 com confiança média; 2 deles com `cnpj_alerta` de vínculo fraco |
+| CNPJ ambíguo | 9: dois ou mais candidatos igualmente prováveis, nenhum atribuído |
+| Só o nome da startup bate | 4: ficam como candidatos `nao_verificado` |
+| Sem CNPJ | 10: provavelmente pessoa física que ainda não abriu a empresa |
+| Telefone | 22 dos 23 cadastros vinculados têm telefone completo (18 com o nono dígito acrescentado); todos ficam **não confirmados**, porque o cadastro público não traz e-mail para corroborar ([ver regra](#regra-de-contato)) |
+| E-mail | 0: a minhareceita e a BrasilAPI devolvem `email: null` |
+| Tempo | **mais de 1 hora** na primeira rodada, quase toda na busca de CNPJ (pausas de 2,5 s por site e espera do navegador); **27 s** nas rodadas seguintes, com cache |
+
+Para comparar com a prospecção manual: se uma pessoa levar 30 minutos por lead para achar o CNPJ, conferir o quadro societário e o contato (estimativa a validar com o SDR da EJ), os 46 projetos tomariam cerca de **23 horas** de trabalho.
 
 ---
 
@@ -174,7 +195,7 @@ No painel, o campo **Status da IA** e os avisos do detalhe do lead dizem por que
 
 Um telefone ou e-mail **só entra na coluna principal** quando **todas** as condições valem:
 
-1. está **completo** (sem dígitos ocultos; DDD válido; 8 ou 9 dígitos);
+1. está **completo** (sem dígitos ocultos; DDD válido; 8 ou 9 dígitos). Celular de 8 dígitos começando com 6, 7, 8 ou 9, formato antigo que o cadastro da Receita ainda guarda, ganha o 9 na frente;
 2. **não** é de contabilidade, coworking, recepção ou condomínio;
 3. **não** se repete em CNPJs diferentes (sinal de contador/escritório);
 4. o CNPJ foi **vinculado** ao proponente/startup;
@@ -183,6 +204,8 @@ Um telefone ou e-mail **só entra na coluna principal** quando **todas** as cond
 Em qualquer outro caso o número **não vai para a coluna principal**, e o motivo aparece de forma explícita: `dígitos ocultos`, `incompleto`, `contabilidade`, `coworking/recepção`, `compartilhado` ou `não confirmado`. O número do cadastro, quando existe, aparece só no detalhe do lead, rotulado como **não confirmado**.
 
 Mesmo um contato "confirmado" vem do cadastro do CNPJ e pode ter sido preenchido pelo contador; por isso o painel mostra a **confiança** (alta/média) e a observação.
+
+**O cadastro público não traz e-mail.** A minhareceita e a BrasilAPI devolvem `email: null` (confirmado até no CNPJ do Banco do Brasil). Sem e-mail, a corroboração da condição 5 só acontece quando o CNPJ é de MEI no nome do proponente. Por isso, na prática, quase todo telefone fica como **não confirmado** e aparece só no detalhe do lead. A decisão foi manter a regra conservadora no MVP: o SDR vê o número com o rótulo e confirma na primeira ligação.
 
 ---
 
@@ -218,21 +241,31 @@ Falhas de rede, bloqueios e limites nunca derrubam o pipeline: viram status por 
 
 ## Limitações conhecidas
 
-- **A busca de CNPJ depende de sites externos.** O endpoint público da Casa dos Dados e as páginas do cnpj.biz **não têm contrato de estabilidade** e podem mudar ou bloquear. O código foi testado contra servidores simulados, **não contra os sites reais**. Use `--diagnostico` na primeira rodada. Se todas as fontes falharem, o lead fica `sem_cnpj` e o CSV manual cobre os casos importantes.
+- **A busca de CNPJ depende de sites externos.** O endpoint público da Casa dos Dados e as páginas do cnpj.biz **não têm contrato de estabilidade** e podem mudar ou bloquear. Na rodada real de 23/10/2026, a página de empresa da Casa dos Dados devolveu 403, e muitas buscas passaram pelo buscador web. Use `--diagnostico` na primeira rodada. Se todas as fontes falharem, o lead fica `sem_cnpj` e o CSV manual cobre os casos importantes.
 - **Nem todo proponente tem CNPJ ainda.** Muitos projetos são de pessoa física que abre a empresa só após a contratação; nesses casos `sem_cnpj` é o resultado correto.
 - **Homônimos.** A conferência reduz o risco, mas não o elimina; revise os leads `confiança média` antes de abordar.
 - **Contato do cadastro é incerto por natureza** (pode ser do contador). A regra acima é conservadora de propósito: poucos números na planilha, mas com motivo claro.
 - **A IA decide com pouco texto** (título e temática): a nota é uma priorização, não um veredito.
 - **Camada gratuita do Gemini** tem limite de requisições por minuto/dia; o código espera e usa cache, mas uma rodada de muitos leads pode precisar ser feita em partes.
 - Os testes automatizados (`tests/test_poc.py`) rodam offline, com cliente de IA e cadastros simulados. Eles **não** testam os sites reais nem o Gemini.
+- **Telefone quase sempre não confirmado**, porque o cadastro público não tem e-mail (ver [Regra de contato](#regra-de-contato)).
 - **Bate parcial de nomes.** A conferência aceita um sócio que contém só 2 nomes do proponente ("Maria Silva" casa com "Maria Silva Santos Oliveira"). Esses casos são marcados com `cnpj_alerta`, mas a regra não foi endurecida para não mudar os resultados perto da entrega.
+
+---
+
+## Próximos passos
+
+- **Desempatar os ambíguos (20% na rodada real).** Duas causas apareceram: o nome da startup é uma palavra comum ("Primeiro", "Green", "Farol") e casa com empresas sem relação; ou o proponente é sócio de duas empresas. O desempate pode usar CNAE de tecnologia, abertura a partir de 2025 e a semelhança do nome com o título. Fica para depois do MVP porque muda os CNPJs encontrados.
+- **Endurecer o bate parcial** para exigir 3 nomes em comum, hoje só sinalizado com `cnpj_alerta`.
+- **E-mail de outra fonte**, como a API oficial da Casa dos Dados (`CASADOSDADOS_API_KEY`), para voltar a ter corroboração de telefone.
+- **Restringir o `ddgs` a menos buscadores**, para reduzir o envio do nome do proponente a terceiros.
 
 ---
 
 ## Roteiro da demonstração
 
 1. **Terminal:** rode o pipeline (PDF real, busca de CNPJ, contatos, IA) e mostre `data/cnpjs_encontrados.csv`.
-2. **Painel:** filtre por **alto fit** e por **telefone confirmado**.
+2. **Painel:** filtre por **alto fit** e marque **Só com CNPJ vinculado**.
 3. **Detalhe:** mostre a justificativa com trechos literais e **como o CNPJ foi encontrado** (evidência e confiança).
 4. **Contato claro:** abra um lead com contato **bloqueado** (contabilidade, compartilhado ou dígitos ocultos) e mostre o motivo.
 5. **Guardrail:** abra um lead em `revisar` ou `ambíguo`.
