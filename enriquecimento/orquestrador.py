@@ -27,6 +27,7 @@ from pathlib import Path
 from extracao.validacao import cnpj_valido, limpar_cnpj
 from enriquecimento import brasilapi, contatos, identidade
 from enriquecimento.descoberta import Buscador
+from planilha import celula_segura
 
 log = logging.getLogger("enriquecimento")
 
@@ -285,7 +286,7 @@ def exportar_cnpjs_encontrados(leads: list[dict], caminho: Path | str = CSV_ENCO
             w = csv.DictWriter(f, fieldnames=_COLUNAS_RELATORIO, delimiter=";", extrasaction="ignore")
             w.writeheader()
             for l in leads:
-                w.writerow({c: ("" if l.get(c) is None else l.get(c)) for c in _COLUNAS_RELATORIO})
+                w.writerow({c: ("" if l.get(c) is None else celula_segura(l.get(c))) for c in _COLUNAS_RELATORIO})
         return caminho
     except OSError as e:
         log.warning("Não consegui gravar %s: %s", caminho, e)

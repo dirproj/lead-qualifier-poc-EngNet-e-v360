@@ -39,6 +39,7 @@ import pandas as pd
 import streamlit as st
 
 from classificacao.perfil import CATALOGO_SERVICOS
+from planilha import celula_segura
 
 RAIZ = Path(__file__).resolve().parent
 ARQ_LEADS = RAIZ / "data" / "leads_processados.json"
@@ -497,7 +498,7 @@ def exportar_csv(leads: list[dict], crm: dict, mostrar_proponente: bool) -> byte
         })
         linhas.append(linha)
     # utf-8-sig + ';' para abrir direto no Excel em português
-    return pd.DataFrame(linhas).to_csv(index=False, sep=";").encode("utf-8-sig")
+    return pd.DataFrame(linhas).map(celula_segura).to_csv(index=False, sep=";").encode("utf-8-sig")
 
 
 # ---------------------------------------------------------------
