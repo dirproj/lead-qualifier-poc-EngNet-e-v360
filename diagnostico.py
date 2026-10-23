@@ -6,7 +6,7 @@ DIAGNÓSTICO DA INSTALAÇÃO: rode quando "o sistema não está rodando direito"
 
 O que ele pega:
   - pacote não instalado ou navegador do Playwright ausente;
-  - chave de IA ausente (Gemini/Groq) ou provedor errado;
+  - chave do Gemini ausente;
   - ARQUIVOS DESENCONTRADOS: um módulo de uma versão chamando outro de versão diferente
     (ex.: "Buscador.__init__() got an unexpected keyword argument 'uf'");
   - módulos do pipeline importando streamlit (só o app.py deveria).
@@ -41,7 +41,7 @@ def checar_python() -> None:
 
 def checar_pacotes() -> None:
     pacotes = {"playwright": "playwright", "pdfplumber": "pdfplumber", "requests": "requests",
-               "openai": "openai", "dotenv": "python-dotenv", "streamlit": "streamlit",
+               "google.genai": "google-genai", "dotenv": "python-dotenv", "streamlit": "streamlit",
                "pandas": "pandas", "bs4": "beautifulsoup4", "ddgs": "ddgs"}
     faltando = []
     for mod, pip_nome in pacotes.items():
@@ -69,15 +69,11 @@ def checar_env() -> None:
     except Exception as e:  # noqa: BLE001
         linha(FALHA, f"classificacao/llm.py não importa: {type(e).__name__}: {e}")
         return
-    if not hasattr(llm, "_provedor"):
-        linha(FALHA, "classificacao/llm.py é uma versão ANTIGA (sem Gemini/Groq). Substitua pelo arquivo novo.")
-        return
     env = RAIZ / ".env"
     linha(OK if env.exists() else AVISO, f".env {'encontrado' if env.exists() else 'NÃO encontrado na raiz (copie .env.example)'}")
-    prov = llm._provedor()
     tem_chave = bool(llm._chave_api())
     linha(OK if tem_chave else FALHA,
-          f"Provedor de IA: {prov} | modelo: {llm._modelo()} | chave: {'definida' if tem_chave else 'AUSENTE (GEMINI_API_KEY ou GROQ_API_KEY no .env)'}")
+          f"IA: Gemini | modelo: {llm._modelo()} | chave: {'definida' if tem_chave else 'AUSENTE (GEMINI_API_KEY no .env)'}")
 
 
 def checar_versoes() -> None:
