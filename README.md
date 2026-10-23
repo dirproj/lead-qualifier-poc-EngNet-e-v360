@@ -195,6 +195,7 @@ Mesmo um contato "confirmado" vem do cadastro do CNPJ e pode ter sido preenchido
 | **Validação em Python** | Nota inteira de 0 a 10, serviços do catálogo; resposta inválida é rejeitada e o modelo corrige (até 3 tentativas). |
 | **Ancoragem** | Cada evidência precisa ser trecho **literal** dos dados; senão é descartada e o lead vai para `revisar`. |
 | **Regras determinísticas** | Dados insuficientes limitam a nota a 4; nota alta sem evidência cai para 6; termos como *faturamento* ou *investidores* sem base geram aviso. |
+| **Nota por regras (reserva)** | Sem chave, com falha da IA ou fora do limite do `--max-ia`, o lead recebe uma nota conservadora por palavras-chave (no máximo 6, ou 7 com CNAE de tecnologia), marcada como `regras (sem IA)` no painel. |
 | **Conferência de CNPJ** | Dígito verificador validado e candidato conferido no cadastro (sócio/MEI, UF, situação ativa). Ambíguo ou fraco **não é atribuído**. |
 
 Falhas de rede, bloqueios e limites nunca derrubam o pipeline: viram status por lead. Respostas do LLM, buscas e cadastros ficam em **cache**, o que poupa a cota gratuita e deixa a demo estável.

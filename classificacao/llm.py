@@ -35,6 +35,7 @@ try:
 except ImportError:
     pass
 
+from classificacao import regras
 from classificacao.guardrails import SCHEMA, validar_resposta, resultado_falha
 from classificacao.perfil import EMPRESA_DESCRICAO, CATALOGO_SERVICOS
 
@@ -80,6 +81,7 @@ ESCALA: 9-10 necessidade evidente e alinhada aos serviços; 7-8 forte indício;
 4-6 possível, mas incerto; 1-3 pouco provável; 0 sem relação."""
 
 VERSAO_PROMPT = "v3"
+STATUS_SEM_NOTA_DA_IA = ("falha", "sem_chave", "nao_processado")
 
 
 class ErroFatalIA(Exception):
@@ -219,14 +221,13 @@ def classificar_leads(leads: list[dict], modelo: str | None = None,
             resultado = resultado_falha(fatal, status_fatal)
         elif max_chamadas is not None and chamadas >= max_chamadas:
             resultado = resultado_falha("limite de chamadas atingido (--max-ia)", "nao_processado")
+        elif client is None and not _chave_api():
+            fatal = "Chave da IA não definida no .env (GEMINI_API_KEY)"
+            status_fatal = "sem_chave"
+            log.error(fatal)
+            resultado = resultado_falha(fatal, status_fatal)
         else:
             if client is None:
-                if not _chave_api():
-                    fatal = "Chave da IA não definida no .env (GEMINI_API_KEY)"
-                    status_fatal = "sem_chave"
-                    log.error(fatal)
-                    saida.append({**lead, **resultado_falha(fatal, "sem_chave"), "modelo_ia": modelo})
-                    continue
                 client = criar_cliente()
             try:
                 resultado = classificar_lead(lead, client, modelo)
@@ -242,6 +243,8 @@ def classificar_leads(leads: list[dict], modelo: str | None = None,
                 if usar_cache:
                     _salvar_cache(cache)
 
+        if resultado["status_ia"] in STATUS_SEM_NOTA_DA_IA:
+            resultado = regras.pontuar(lead, resultado["avisos_ia"][0])
         saida.append({**lead, **resultado, "modelo_ia": modelo})
 
     contagem: dict[str, int] = {}

@@ -58,6 +58,14 @@ class TestIA(unittest.TestCase):
         with self.assertRaises(llm.ErroFatalIA):
             llm.classificar_lead(LEAD, ClienteGeminiFalso([Exception("401 UNAUTHENTICATED")]), "m")
 
+    def test_lote_sem_nota_da_ia_cai_nas_regras(self):
+        c = ClienteGeminiFalso(["isto não é json"] * 3)
+        out = llm.classificar_leads([dict(LEAD), dict(LEAD, titulo_projeto="Outro app")], client=c,
+                                    max_chamadas=1, usar_cache=False, pausa=0)
+        self.assertEqual([l["status_ia"] for l in out], ["regras", "regras"])
+        self.assertTrue(all(l["nota_fit"] is not None for l in out))
+        self.assertIn("limite de chamadas", out[1]["avisos_ia"][0])
+
     def test_json_quebrado_vira_falha_sem_nota(self):
         r = llm.classificar_lead(LEAD, ClienteGeminiFalso(["isto não é json"] * 3), "m")
         self.assertEqual(r["status_ia"], "falha")
@@ -70,8 +78,8 @@ class TestIA(unittest.TestCase):
             out = llm.classificar_leads([dict(LEAD), dict(LEAD, titulo_projeto="Outro")], usar_cache=False, pausa=0)
         finally:
             llm._chave_api = chave_original
-        self.assertEqual([l["status_ia"] for l in out], ["sem_chave", "sem_chave"])
-        self.assertIn("GEMINI_API_KEY", out[0]["avisos_ia"][0])
+        self.assertEqual([l["status_ia"] for l in out], ["regras", "regras"])
+        self.assertTrue(all("GEMINI_API_KEY" in l["avisos_ia"][0] for l in out))
 
     def test_nome_do_proponente_nao_vai_para_a_ia(self):
         self.assertNotIn("proponente", llm.montar_payload({**LEAD, "proponente": "Fulano de Tal"}))

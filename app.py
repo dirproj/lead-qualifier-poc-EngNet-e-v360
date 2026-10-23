@@ -66,7 +66,7 @@ FAIXAS = ["alto", "medio", "baixo", "sem nota"]
 ICONE_FAIXA = {"alto": "🟢", "medio": "🟡", "baixo": "🔴", "sem nota": "⚪"}
 ROTULO_STATUS_IA = {
     "ok": " ok", "revisar": " revisar", "falha": " falha",
-    "sem_chave": " sem chave", "nao_processado": "⏸ não processado",
+    "sem_chave": " sem chave", "nao_processado": "⏸ não processado", "regras": " regras (sem IA)",
 }
 ROTULO_ENRIQ = {
     "ok": " CNPJ vinculado", "sem_cnpj": "— sem CNPJ", "cnpj_invalido": " CNPJ inválido",
@@ -309,7 +309,7 @@ def painel_coleta() -> None:
         if modo == MODO_TESTE:
             max_ia = int(st.number_input(
                 "Máximo de chamadas à IA", min_value=1, max_value=50, value=3, step=1, key="coleta_max_ia",
-                help="Os demais leads aparecem como 'não processado', sem nota de fit.",
+                help="Os demais leads recebem a nota por regras de palavras-chave, marcada como 'regras (sem IA)'.",
             ))
         else:
             liberado = st.checkbox(
@@ -523,6 +523,8 @@ def painel_detalhe(lead: dict, crm: dict, mostrar_proponente: bool) -> None:
         m2.metric("Faixa", f"{ICONE_FAIXA[faixa]} {faixa}")
         m3.metric("Confiança", lead.get("confianca") or "—")
 
+        if lead.get("status_ia") == "regras":
+            st.info("; ".join(lead.get("avisos_ia") or ["nota calculada por regras, não pela IA"]))
         if lead.get("justificativa"):
             st.markdown("**Por que essa nota**")
             st.write(lead["justificativa"])
