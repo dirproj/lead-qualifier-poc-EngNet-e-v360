@@ -180,13 +180,13 @@ class ExecucaoPipeline:
             return 0.0
         return (self.fim or time.time()) - self.inicio
 
-    def iniciar(self, url: str, max_ia: int | None) -> str | None:
+    def iniciar(self, url: str, uf: str, max_ia: int | None) -> str | None:
         """Dispara a coleta. Devolve uma mensagem de erro, ou None se deu certo."""
         with self._trava:
             if self.rodando:
                 return "Já existe uma busca em andamento."
             # Lista de argumentos (sem shell): a URL nunca é interpretada como comando.
-            cmd = [sys.executable, "-u", str(ARQ_PIPELINE), "--pagina", url]
+            cmd = [sys.executable, "-u", str(ARQ_PIPELINE), "--pagina", url, "--uf", uf]
             if max_ia:
                 cmd += ["--max-ia", str(max_ia)]
             env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
@@ -320,7 +320,7 @@ def painel_coleta() -> None:
                        "sem classificação da IA (status “sem chave”).")
 
         if st.button("▶ Buscar leads", type="primary", disabled=not liberado, key="btn_buscar_leads"):
-            erro = exe.iniciar(URL_CENTELHA.format(uf=uf.lower()), max_ia)
+            erro = exe.iniciar(URL_CENTELHA.format(uf=uf.lower()), uf, max_ia)
             if erro:
                 st.error(erro)
             else:
@@ -373,7 +373,7 @@ def barra_lateral(leads: list[dict]) -> dict:
 
 def estado_da_lead(lead: dict) -> str:
     """Identifica a UF da lead a partir dos campos disponíveis no JSON."""
-    chaves_estado = ("uf", "estado_uf", "sigla_uf", "estado", "unidade_federativa")
+    chaves_estado = ("uf_edital", "uf", "estado_uf", "sigla_uf", "estado", "unidade_federativa")
     for chave in chaves_estado:
         valor = lead.get(chave)
         if not valor:

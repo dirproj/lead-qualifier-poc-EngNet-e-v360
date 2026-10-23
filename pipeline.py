@@ -37,6 +37,7 @@ def rodar(pdf=None, pagina=None, palavras=None, limite=1, demo=False,
           sem_ia=False, max_ia=None, busca_cnpj=True, uf="DF", cache_cnpj=True) -> list[dict]:
     leads = coletar_leads(pdf=pdf, pagina=pagina, palavras_chave=palavras,
                           limite_pdfs=limite, demo=demo)                     # Etapa 1
+    leads = [{**lead, "uf_edital": uf.upper()} for lead in leads]
     leads = enriquecer_leads(leads, automatico=busca_cnpj, uf_alvo=uf,
                              usar_cache=cache_cnpj)                          # Etapa 2
     exportar_cnpjs_encontrados(leads)    # data/cnpjs_encontrados.csv (para auditar a busca)
