@@ -33,6 +33,7 @@ log = logging.getLogger("enriquecimento")
 
 RAIZ = Path(__file__).resolve().parent.parent
 CSV_PADRAO = RAIZ / "data" / "cnpjs_manuais.csv"
+CSV_NAO_CONTATAR = RAIZ / "data" / "nao_contatar.csv"
 CACHE_PATH = RAIZ / "data" / "cache_cnpj.json"
 MAX_VERIFICAR = 10  # candidatos conferidos por lead (poupa as APIs gratuitas)
 
@@ -70,6 +71,23 @@ def carregar_mapa_cnpj(caminho: Path | str = CSV_PADRAO) -> dict[str, str]:
     return mapa
 
 
+def carregar_nao_contatar(caminho: Path | str = CSV_NAO_CONTATAR) -> tuple[set[str], set[str]]:
+    nomes: set[str] = set()
+    cnpjs: set[str] = set()
+    try:
+        with open(caminho, newline="", encoding="utf-8") as f:
+            for linha in csv.DictReader(f):
+                if linha.get("proponente"):
+                    nomes.add(_chave(linha["proponente"]))
+                if linha.get("cnpj"):
+                    cnpjs.add(limpar_cnpj(linha["cnpj"]))
+    except FileNotFoundError:
+        pass
+    except Exception as e:  # noqa: BLE001
+        log.error("Erro lendo %s: %s", caminho, e)
+    return nomes, cnpjs
+
+
 # ---------------------------------------------------------------
 # Cache (poupa as APIs/sites e deixa a demo estável)
 # ---------------------------------------------------------------
@@ -85,12 +103,15 @@ class Cache:
             except (FileNotFoundError, json.JSONDecodeError):
                 pass
 
-    def salvar(self) -> None:
+    def salvar(self, vinculados: set[str] = frozenset()) -> None:
         if not self.ativo:
             return
+        registros = {cnpj: r if cnpj in vinculados else contatos.minimizar_contatos(r)
+                     for cnpj, r in self.dados["registro"].items()}
         try:
             self.caminho.parent.mkdir(parents=True, exist_ok=True)
-            self.caminho.write_text(json.dumps(self.dados, ensure_ascii=False), encoding="utf-8")
+            self.caminho.write_text(json.dumps({**self.dados, "registro": registros}, ensure_ascii=False),
+                                    encoding="utf-8")
         except OSError as e:
             log.warning("Não consegui salvar o cache de CNPJ: %s", e)
 
@@ -213,8 +234,11 @@ def _completar_contato_pelo_site(registro: dict, buscador) -> None:
 # ---------------------------------------------------------------
 def enriquecer_leads(leads: list[dict], mapa_cnpj: dict[str, str] | None = None,
                      automatico: bool = True, uf_alvo: str = "DF", usar_cache: bool = True,
-                     buscador=None, consulta=None, pausa: float = 0.3) -> list[dict]:
+                     buscador=None, consulta=None, pausa: float = 0.3,
+                     nao_contatar: tuple[set[str], set[str]] | None = None) -> list[dict]:
     mapa = carregar_mapa_cnpj() if mapa_cnpj is None else mapa_cnpj
+    nomes_bloqueados, cnpjs_bloqueados = carregar_nao_contatar() if nao_contatar is None else nao_contatar
+    bloqueados = 0
     consulta = consulta or brasilapi.consultar_cnpj
     cache = Cache(usar_cache)
 
@@ -228,7 +252,17 @@ def enriquecer_leads(leads: list[dict], mapa_cnpj: dict[str, str] | None = None,
     try:
         for lead in leads:
             lead = dict(lead)
+            if _chave(lead.get("proponente", "")) in nomes_bloqueados:
+                bloqueados += 1
+                continue
             campos, registro, ident = _resolver(lead, mapa, buscador, consulta, cache, uf_alvo)
+            if campos.get("cnpj") in cnpjs_bloqueados:
+                bloqueados += 1
+                continue
+            if registro and registro.get("contatos_minimizados"):
+                atualizado, _ = consulta(campos["cnpj"])
+                if atualizado:
+                    registro = cache.dados["registro"][campos["cnpj"]] = atualizado
             if registro:
                 if buscador is not None:
                     _completar_contato_pelo_site(registro, buscador)
@@ -240,7 +274,7 @@ def enriquecer_leads(leads: list[dict], mapa_cnpj: dict[str, str] | None = None,
     finally:
         if proprio:
             proprio.fechar()
-        cache.salvar()
+        cache.salvar({r["cnpj"] for _, r, _ in resultados if r})
 
     # ---- 2ª passada: contatos (precisa ver todos os CNPJs para achar números compartilhados) ----
     # Considera TODOS os cadastros consultados (inclusive candidatos rejeitados): um contador
@@ -260,6 +294,8 @@ def enriquecer_leads(leads: list[dict], mapa_cnpj: dict[str, str] | None = None,
     for l in saida:
         cont[l["status_enriquecimento"]] = cont.get(l["status_enriquecimento"], 0) + 1
     com_tel = sum(1 for l in saida if l.get("telefone"))
+    if bloqueados:
+        log.info("%d leads fora da coleta por estarem em %s", bloqueados, CSV_NAO_CONTATAR.name)
     log.info("CNPJ: %s | telefones confirmados: %d | e-mails confirmados: %d",
              cont, com_tel, sum(1 for l in saida if l.get("email")))
     return saida
