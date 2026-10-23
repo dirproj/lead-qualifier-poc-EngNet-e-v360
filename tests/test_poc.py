@@ -155,6 +155,17 @@ class TestContatos(unittest.TestCase):
         self.assertEqual(contatos.analisar_telefone("(61) 9****-4321")["status"], "mascarado")
         self.assertEqual(contatos.analisar_telefone("99812-3456")["status"], "incompleto")
         self.assertEqual(contatos.analisar_telefone("(00) 99812-3456")["status"], "invalido")
+        self.assertEqual(contatos.analisar_telefone("(61) 1298-7654")["status"], "incompleto")
+
+    def test_celular_no_formato_antigo_ganha_o_nono_digito(self):
+        a = contatos.analisar_telefone("6191980166")
+        self.assertEqual((a["status"], a["tipo"], a["formatado"]), ("completo", "celular", "(61) 99198-0166"))
+        self.assertEqual(a["digitos"], "6191980166")
+        r = contatos.avaliar_contato({"razao_social": "MARIA SOUZA LIMA", "titular_unico": True,
+                                      "telefones": ["6191980166"]},
+                                     {"pessoa": "exato"}, {"proponente": "Maria Souza Lima"}, set(), set())
+        self.assertEqual(r["telefone"], "(61) 99198-0166")
+        self.assertIn("nono dígito", r["telefone_obs"])
 
     def avaliar(self, registro, compartilhados=(set(), set())):
         ident = {"pessoa": "exato"}

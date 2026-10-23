@@ -42,6 +42,8 @@ PROVEDORES_GRATIS = {
     "gmail", "hotmail", "outlook", "yahoo", "live", "icloud", "bol", "uol",
     "terra", "ig", "globo", "protonmail", "msn", "me",
 }
+PREFIXOS_DE_CELULAR_SEM_NONO_DIGITO = "6789"
+AJUSTE_NONO_DIGITO = "nono dígito acrescentado (o cadastro guarda o celular no formato antigo)"
 _RE_MASCARA = re.compile(r"[*•#_·●]|[xX]{2,}")
 _RE_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -81,6 +83,9 @@ def analisar_telefone(bruto: str | None) -> dict:
         tipo, fmt = "celular", f"({d[:2]}) {numero[:5]}-{numero[5:]}"
     elif len(numero) == 8 and numero[0] in "2345":
         tipo, fmt = "fixo", f"({d[:2]}) {numero[:4]}-{numero[4:]}"
+    elif len(numero) == 8 and numero[0] in PREFIXOS_DE_CELULAR_SEM_NONO_DIGITO:
+        return {"status": "completo", "digitos": d, "tipo": "celular",
+                "formatado": f"({d[:2]}) 9{numero[:4]}-{numero[4:]}", "motivo": AJUSTE_NONO_DIGITO}
     else:
         return {"status": "incompleto", "digitos": d, "tipo": None, "formatado": texto,
                 "motivo": "formato fora do padrão (celular sem o 9 ou prefixo inválido)"}
@@ -228,6 +233,8 @@ def avaliar_contato(registro: dict, identidade: dict, lead: dict,
         status, obs, conf = _decidir(
             a, terceiro, bool(a["digitos"]) and impressao(a["digitos"]) in tel_compartilhados,
             vinculo_ok, corrobora, titular_exato)
+        if a["motivo"] == AJUSTE_NONO_DIGITO:
+            obs = f"{obs}; {AJUSTE_NONO_DIGITO}"
         opcoes.append((_PRIORIDADE[status], status, obs, conf, a))
     if opcoes:
         _, status, obs, conf, a = min(opcoes, key=lambda o: o[0])
