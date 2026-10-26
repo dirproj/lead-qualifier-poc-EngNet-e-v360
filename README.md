@@ -275,4 +275,4 @@ Falhas de rede, bloqueios e limites nunca derrubam o pipeline: viram status por 
 
 **Stack:** Python 3.10+ · Playwright · pdfplumber · requests · Gemini (SDK `google-genai`) · minhareceita.org / BrasilAPI · Streamlit · pandas
 
-**Equipe:** _(preencha os nomes)_
+**Equipe:** Angélica Campos, Caio Leal, Gabriel Lima, João Igor e Luisa Souza
